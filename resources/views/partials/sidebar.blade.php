@@ -19,10 +19,6 @@
         @php
             $currentUser = auth()->user();
 
-            $projectsCount = \App\Models\Project::count();
-
-            $teamsCount = \App\Models\Team::count();
-
             $unreadNotifsCount = \App\Models\Notification::where(
                 'user_id',
                 $currentUser->user_id
@@ -63,12 +59,22 @@
                 </svg>
 
                 <span>Projects</span>
-
-                <span class="nav-badge">
-                    {{ $projectsCount }}
-                </span>
             </a>
         @endcan
+        <a
+            href="{{ route('tasks.index') }}"
+            class="nav-item {{ request()->routeIs('tasks.*') ? 'active' : '' }}"
+        >
+            <svg width="16" height="16" viewBox="0 0 24 24"
+                fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M9 6h11M9 12h11M9 18h11" />
+                <path d="M3.5 6l1.3 1.3L7.5 4.5" />
+                <path d="M3.5 12l1.3 1.3L7.5 10.5" />
+                <path d="M3.5 18l1.3 1.3L7.5 16.5" />
+            </svg>
+
+            <span>Tasks</span>
+        </a>
 
         @can('view_projects')
             <a
@@ -84,10 +90,6 @@
                 </svg>
 
                 <span>Teams</span>
-
-                <span class="nav-badge">
-                    {{ $teamsCount }}
-                </span>
             </a>
         @endcan
 

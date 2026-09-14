@@ -365,6 +365,19 @@
   </div>
 </div>
 
+@php
+  $taskProjectPhases = $projects->mapWithKeys(function ($project) {
+    return [
+      $project->project_id => $project->phases->map(function ($phase) {
+        return [
+          'id' => $phase->phase_id,
+          'name' => $phase->phase_name,
+          'status' => $phase->status,
+        ];
+      })->values(),
+    ];
+  });
+@endphp
 <script>
   let draggedTaskId = null;
   let sourceColumnBody = null;
@@ -486,13 +499,7 @@
     }
   });
 
-  const taskProjectPhases = @json($projects->mapWithKeys(fn ($project) => [
-    $project->project_id => $project->phases->map(fn ($phase) => [
-      'id' => $phase->phase_id,
-      'name' => $phase->phase_name,
-      'status' => $phase->status,
-    ])->values(),
-  ]));
+  const taskProjectPhases = {{ \Illuminate\Support\Js::from($taskProjectPhases) }};
 
   function updateNewTaskPhases(projectId) {
     const phaseSelect = document.getElementById('task_phase_id');
