@@ -14,6 +14,7 @@ use App\Models\ProjectDeliverable;
 use App\Models\ProjectMemberRole;
 use App\Models\ProjectType;
 use App\Models\Task;
+use App\Models\TaskAssignment;
 use App\Models\Team;
 use App\Models\User;
 use App\Services\ProjectWizardService;
@@ -58,23 +59,38 @@ class ProjectController extends Controller
     {
         Gate::authorize('view_projects');
 
+        /** @var User $authUser */
+        $authUser = Auth::user();
+        $isAdmin = $authUser->canAccessGlobalScope();
+
         $query = Project::with(['team.leader', 'teams.leader', 'projectManager', 'budget', 'tasks', 'phases.tasks', 'memberRoles.user']);
 
         $projectTypes = ProjectType::where('is_active', true)->orderBy('name')->get();
 
         /*
-         * When an office filter is active, only show project types that are
-         * either global or belong to that office, so the pills follow the
-         * office dropdown.
+         * Only organization-wide viewers may switch offices; everyone else is
+         * pinned to the offices their own scope covers.
          */
-        if ($officeFilter = $request->get('office')) {
+        $offices = $isAdmin
+            ? Office::orderBy('office_name')->get()
+            : Office::whereIn('office_id', $authUser->officeScopeIds()->all())->orderBy('office_name')->get();
+
+        /*
+         * The active office drives the Project Type tabs: when an office is
+         * selected (either explicitly by an admin or implicitly by the viewer's
+         * scope) only that office's types plus global types are offered.
+         */
+        $officeFilter = $isAdmin ? $request->get('office') : $offices->first()?->office_id;
+
+        if ($officeFilter) {
             $projectTypes = $projectTypes->filter(
                 fn ($t) => empty($t->office_id) || $t->office_id == $officeFilter
             )->values();
         }
 
         if ($type = $request->get('type')) {
-            $typeModel = $projectTypes->firstWhere('name', $type);
+            $typeModel = $projectTypes->firstWhere('name', $type)
+                ?? ProjectType::where('name', $type)->first();
 
             $query->where(function ($q) use ($type, $typeModel) {
                 $q->where('project_type', $type);
@@ -107,11 +123,8 @@ class ProjectController extends Controller
          * role (including Project Managers) only sees projects under their
          * office(s) or ones they participate in directly.
          */
-        $authUser = Auth::user();
-        $offices = Office::orderBy('office_name')->get();
-
-        if ($authUser->isAdmin()) {
-            if ($officeFilter = $request->get('office')) {
+        if ($isAdmin) {
+            if ($officeFilter) {
                 $query->where(function ($q) use ($officeFilter) {
                     $q->where('primary_office_id', $officeFilter)
                         ->orWhereHas('offices', fn ($oq) => $oq->where('offices.office_id', $officeFilter));
@@ -123,7 +136,7 @@ class ProjectController extends Controller
 
         $projects = $query->orderByDesc('project_id')->paginate(15)->withQueryString();
 
-        return view('projects.index', compact('projects', 'projectTypes', 'offices'));
+        return view('projects.index', compact('projects', 'projectTypes', 'offices', 'isAdmin', 'officeFilter'));
     }
 
     public function show(Project $project)
@@ -167,16 +180,37 @@ class ProjectController extends Controller
 
         /** @var User $user */
         $user = Auth::user();
-        abort_unless($user->office_id, 403, 'Your account must belong to an office before creating a project.');
 
-        $teams = Team::with(['leader', 'members.user', 'office'])
-            ->where('office_id', $user->office_id)
-            ->orderBy('team_name')->get();
-        $projectManagers = User::where('status', 'Active')
-            ->where('office_id', $user->office_id)
-            ->orderBy('full_name')->get();
+        // Admins can access global scope and create projects for any office.
+        // Other users must have an office assignment.
+        if (! $user->canAccessGlobalScope() && ! $user->office_id) {
+            abort(403, 'Your account must belong to an office before creating a project.');
+        }
+
+        // For non-admin users, show only their office teams.
+        // For admins, show all teams across all offices.
+        $teamsQuery = Team::with(['leader', 'members.user', 'office']);
+        if (! $user->canAccessGlobalScope()) {
+            $teamsQuery = $teamsQuery->where('office_id', $user->office_id);
+        }
+        $teams = $teamsQuery->orderBy('team_name')->get();
+
+        // For non-admin users, show only their office project managers.
+        // For admins, show all active users.
+        $projectManagersQuery = User::where('status', 'Active');
+        if (! $user->canAccessGlobalScope()) {
+            $projectManagersQuery = $projectManagersQuery->where('office_id', $user->office_id);
+        }
+        $projectManagers = $projectManagersQuery->orderBy('full_name')->get();
+
         $projectTypes = ProjectType::where('is_active', true)->orderBy('name')->get();
-        $offices = Office::active()->where('office_id', $user->office_id)->orderBy('office_name')->get();
+
+        // For non-admin users, show only their office. For admins, show all active offices.
+        $officesQuery = Office::active();
+        if (! $user->canAccessGlobalScope()) {
+            $officesQuery = $officesQuery->where('office_id', $user->office_id);
+        }
+        $offices = $officesQuery->orderBy('office_name')->get();
 
         $teamsData = $teams->map(function ($t) {
             return [
@@ -205,6 +239,7 @@ class ProjectController extends Controller
             'priorities' => self::PRIORITIES,
             'projectManagers' => $projectManagers,
             'offices' => $offices,
+            'isAdmin' => $user->canAccessGlobalScope(),
         ]);
     }
 
@@ -346,6 +381,8 @@ class ProjectController extends Controller
                 'tasks.*.task_name' => ['nullable', 'string', 'max:150'],
                 'tasks.*.team_id' => ['nullable', 'exists:teams,team_id'],
                 'tasks.*.assigned_to' => ['nullable'],
+                'tasks.*.user_ids' => ['nullable', 'array'],
+                'tasks.*.user_ids.*' => ['exists:users,user_id'],
                 'tasks.*.priority' => ['nullable', 'in:Low,Medium,High,Urgent'],
                 'tasks.*.budget' => ['nullable', 'numeric', 'min:0'],
                 'tasks.*.start_date' => ['nullable', 'date'],
@@ -374,22 +411,34 @@ class ProjectController extends Controller
                     continue;
                 }
 
-                $assigneeId = $this->resolveUserId($taskData['assigned_to'] ?? null, $taskData['team_id'] ?? $project->team_id);
+                $taskTeamId = $taskData['team_id'] ?? $project->team_id;
+
+                // Multi-select payload: several team members per task. The
+                // legacy single `assigned_to` value is still honoured.
+                $assigneeIds = collect($taskData['user_ids'] ?? [])
+                    ->push($taskData['assigned_to'] ?? null)
+                    ->map(fn ($id) => $this->resolveUserId($id, $taskTeamId))
+                    ->filter()
+                    ->map(fn ($id) => (int) $id)
+                    ->unique()
+                    ->values();
 
                 // Server-side office restriction for task assignees.
-                $assignee = $assigneeId ? User::find($assigneeId) : null;
-                if ($assignee && ! $project->canAssignUser($assignee)) {
-                    return response()->json([
-                        'message' => "{$assignee->full_name} belongs to an office that is not associated with this project.",
-                    ], 422);
+                foreach ($assigneeIds as $candidateId) {
+                    $candidate = User::find($candidateId);
+                    if ($candidate && ! $project->canAssignUser($candidate)) {
+                        return response()->json([
+                            'message' => "{$candidate->full_name} belongs to an office that is not associated with this project.",
+                        ], 422);
+                    }
                 }
 
-                Task::create([
+                $task = Task::create([
                     'project_id' => $project->project_id,
                     'phase_id' => $firstPhase?->phase_id,
-                    'team_id' => $taskData['team_id'] ?? $project->team_id,
+                    'team_id' => $taskTeamId,
                     'task_name' => $taskData['task_name'],
-                    'assigned_to' => $assigneeId,
+                    'assigned_to' => $assigneeIds->first(),
                     'priority' => $taskData['priority'] ?? 'Medium',
                     'status' => 'To Do',
                     'budget' => $taskData['budget'] ?? 0,
@@ -397,6 +446,21 @@ class ProjectController extends Controller
                     'end_date' => $taskData['end_date'] ?? null,
                     'progress' => 0,
                 ]);
+
+                foreach ($assigneeIds as $assigneeId) {
+                    TaskAssignment::create([
+                        'task_id' => $task->task_id,
+                        'user_id' => $assigneeId,
+                        'role_label' => $assigneeId === $task->assigned_to ? 'Primary Assignee' : 'Contributor',
+                        'acceptance_status' => 'Pending Acceptance',
+                        'assigned_by' => $user->user_id,
+                        'assigned_at' => now(),
+                    ]);
+
+                    if ($assigneeId !== (int) $user->user_id) {
+                        Activity::notify($assigneeId, "You have been assigned: \"{$task->task_name}\" on {$project->project_name}", 'task');
+                    }
+                }
             }
             $project->recalculateProgress();
         } elseif ($step === 4) {

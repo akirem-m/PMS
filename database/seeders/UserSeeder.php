@@ -140,8 +140,20 @@ class UserSeeder extends Seeder
     public function run(): void
     {
         $officeIds = Office::pluck('office_id', 'office_name');
+        $firstOfficeId = $officeIds->first();
 
         foreach (self::USERS as $email => $def) {
+            // Admins should be assigned to the first office for UI consistency,
+            // but they retain global access via their Administrator role.
+            $officeId = null;
+            if ($def['office']) {
+                $officeId = $officeIds[$def['office']] ?? null;
+            } elseif ($def['role'] === 'Administrator' && $firstOfficeId) {
+                // Assign admin to first office for UI convenience,
+                // though their global access is controlled by the Administrator role.
+                $officeId = $firstOfficeId;
+            }
+
             $user = User::updateOrCreate(
                 ['email' => $email],
                 [
@@ -151,7 +163,7 @@ class UserSeeder extends Seeder
                     'department' => $def['department'],
                     'status' => 'Active',
                     'role' => 'staff',
-                    'office_id' => $def['office'] ? $officeIds[$def['office']] ?? null : null,
+                    'office_id' => $officeId,
                 ]
             );
 
@@ -170,7 +182,7 @@ class UserSeeder extends Seeder
                     'pm.finance@pms.test',
                     'pm.research@pms.test',
                     'lead.procurement@pms.test',
-                    'lead.students@pms.test'
+                    'lead.students@pms.test',
                 ])
                 ->first();
 

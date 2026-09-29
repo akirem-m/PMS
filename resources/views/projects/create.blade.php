@@ -69,6 +69,19 @@
       </div>
 
       <div class="form-field" style="grid-column:1 / -1;">
+        <label for="primary_office_id">Primary Office <span style="color:var(--accent, #2563eb);">*</span></label>
+        <select id="primary_office_id" name="primary_office_id" data-required>
+          @if ($isAdmin)
+            <option value="">— Select Primary Owning Office —</option>
+          @endif
+          @foreach ($offices as $office)
+            <option value="{{ $office->office_id }}" {{ (string) old('primary_office_id') === (string) $office->office_id ? 'selected' : '' }}>
+              {{ $office->office_name }}</option>
+          @endforeach
+        </select>
+      </div>
+
+      <div class="form-field" style="grid-column:1 / -1;">
         <label for="description">Description</label>
         <textarea id="description" name="description" rows="3" placeholder="Briefly describe the project...">{{ old('description') }}</textarea>
       </div>
@@ -96,7 +109,7 @@
         <select id="project_manager_id" name="project_manager_id">
           <option value="">— Select Project Manager —</option>
           @foreach ($projectManagers as $pm)
-            <option value="{{ $pm->user_id }}" {{ (string) old('project_manager_id') === (string) $pm->user_id ? 'selected' : '' }}>
+            <option value="{{ $pm->user_id }}" data-office="{{ $pm->office_id ?? '' }}" {{ (string) old('project_manager_id') === (string) $pm->user_id ? 'selected' : '' }}>
               {{ $pm->full_name }} ({{ $pm->department ?: 'PM' }})
             </option>
           @endforeach
@@ -129,16 +142,6 @@
       </div>
 
       <div class="form-field">
-        <label for="primary_office_id">Primary Office <span style="color:var(--accent, #2563eb);">*</span></label>
-        <select id="primary_office_id" name="primary_office_id" data-required>
-          @foreach ($offices as $office)
-            <option value="{{ $office->office_id }}" {{ (string) old('primary_office_id') === (string) $office->office_id ? 'selected' : '' }}>
-              {{ $office->office_name }}</option>
-          @endforeach
-        </select>
-      </div>
-
-      <div class="form-field">
         <label>Participating Offices
           <span style="font-weight:400; color:var(--ink-faint);">(cross-office collaboration)</span>
         </label>
@@ -161,7 +164,7 @@
 
     <div class="wizard-actions">
       <div></div>
-      <button type="button" id="btn-step-1-next" class="btn btn-accent" onclick="validateStep1AndNext()">Continue to Teams →</button>
+      <button type="button" id="btn-step-1-next" class="btn btn-accent">Continue to Teams →</button>
     </div>
   </div>
 
@@ -319,6 +322,59 @@
   .task-row-item .btn-remove-task:hover { background:var(--danger-soft); border-color:var(--danger); }
   .team-task-card .btn-add-task { background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:6px 14px; font-size:12.5px; font-weight:600; color:var(--ink-soft); cursor:pointer; transition:background .15s ease, border-color .15s ease; }
   .team-task-card .btn-add-task:hover { background:var(--primary-soft); border-color:var(--primary); color:var(--primary); }
+
+  /* Multi-select assignee picker (Step 3) */
+  .assignee-multiselect { position:relative; }
+  .assignee-control {
+    display:flex; flex-wrap:wrap; align-items:center; gap:6px;
+    min-height:38px; padding:5px 8px;
+    background:var(--surface); border:1px solid var(--line); border-radius:8px;
+    cursor:pointer; transition:border-color .15s ease, box-shadow .15s ease;
+  }
+  .assignee-control:hover { border-color:var(--primary); }
+  .assignee-multiselect.open .assignee-control { border-color:var(--primary); box-shadow:0 0 0 3px var(--primary-soft); }
+  .assignee-placeholder { font-size:13px; color:var(--ink-faint); padding:2px 2px; }
+  .assignee-search {
+    flex:1 1 70px; min-width:70px; border:none; background:transparent; outline:none;
+    font-size:13.3px; font-family:inherit; color:var(--ink); padding:3px 2px;
+  }
+  .assignee-chip {
+    display:inline-flex; align-items:center; gap:5px; max-width:100%;
+    padding:2px 6px 2px 9px; border-radius:999px;
+    background:var(--primary-soft); color:var(--primary);
+    font-size:11.5px; font-weight:600; line-height:1.5;
+  }
+  .assignee-chip .chip-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:150px; }
+  .assignee-chip .chip-remove {
+    display:inline-flex; align-items:center; justify-content:center;
+    width:15px; height:15px; border-radius:50%; border:none; cursor:pointer;
+    background:rgba(37,99,235,0.16); color:var(--primary); font-size:10px; line-height:1; padding:0;
+  }
+  .assignee-chip .chip-remove:hover { background:var(--danger); color:#fff; }
+  .assignee-menu {
+    position:absolute; z-index:40; top:calc(100% + 6px); left:0; right:0;
+    max-height:220px; overflow-y:auto; padding:6px;
+    background:var(--surface); border:1px solid var(--line); border-radius:8px;
+    box-shadow:0 12px 28px rgba(15,23,42,0.16);
+  }
+  .assignee-menu[hidden] { display:none; }
+  .assignee-option {
+    display:flex; align-items:center; gap:9px; width:100%;
+    padding:7px 9px; border-radius:6px; cursor:pointer; text-align:left;
+    background:transparent; border:none; font:inherit; color:var(--ink);
+  }
+  .assignee-option:hover, .assignee-option.is-active { background:var(--primary-soft); }
+  .assignee-option input[type="checkbox"] { width:15px; height:15px; accent-color:var(--primary); cursor:pointer; margin:0; }
+  .assignee-option .option-name { font-size:13px; font-weight:500; }
+  .assignee-option .option-role { margin-left:auto; font-size:11px; color:var(--ink-muted); }
+  .assignee-empty { padding:9px; font-size:12.5px; color:var(--ink-muted); font-style:italic; }
+  .assignee-tools { display:flex; gap:10px; margin-top:6px; }
+  .assignee-tools button {
+    background:none; border:none; padding:0; cursor:pointer;
+    font-size:11.5px; font-weight:600; color:var(--primary);
+  }
+  .assignee-tools button:hover { text-decoration:underline; }
+
   @media (max-width: 768px) {
     .wizard-stepper { flex-direction:column; gap:12px; align-items:flex-start; }
     .wizard-line { display:none; }
@@ -494,7 +550,7 @@
       existingValues.push({
         task_name: row.querySelector('[name*="[task_name]"]')?.value || '',
         team_id: parseInt(row.querySelector('[name*="[team_id]"]')?.value),
-        assigned_to: row.querySelector('[name*="[assigned_to]"]')?.value || '',
+        user_ids: Array.from(row.querySelectorAll('[name*="[user_ids][]"]') || []).map(i => i.value),
         priority: row.querySelector('[name*="[priority]"]')?.value || 'Medium',
         budget: row.querySelector('[name*="[budget]"]')?.value || '',
         start_date: row.querySelector('[name*="[start_date]"]')?.value || '',
@@ -515,8 +571,8 @@
       card.innerHTML = `
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
           <div>
-            <span style="font-weight:700; font-size:15px; color:var(--ink);">${team.name}</span>
-            <span style="font-size:12px; color:var(--ink-soft); margin-left:8px;">(Lead: ${team.leader_name})</span>
+            <span style="font-weight:700; font-size:15px; color:var(--ink);">${escapeHtml(team.name)}</span>
+            <span style="font-size:12px; color:var(--ink-soft); margin-left:8px;">(Lead: ${escapeHtml(team.leader_name)})</span>
           </div>
           <button type="button" class="btn-add-task" onclick="addTaskRow(${team.id})">+ Add Task</button>
         </div>
@@ -535,6 +591,12 @@
     });
   }
 
+  function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[ch]));
+  }
+
   function addTaskRow(teamId, prefill = {}) {
     const rowsContainer = document.getElementById('task-rows-team-' + teamId);
     if (!rowsContainer) return;
@@ -543,13 +605,6 @@
     taskCounter++;
     const idx = taskCounter;
 
-    let memberOptions = ``;
-    if (team && team.members) {
-      team.members.forEach(m => {
-        memberOptions += `<option value="${m.name}">${m.name}</option>`;
-      });
-    }
-
     const row = document.createElement('div');
     row.className = 'task-row-item';
     row.id = 'task-row-' + idx;
@@ -557,13 +612,21 @@
     row.innerHTML = `
       <input type="hidden" name="tasks[${idx}][team_id]" value="${teamId}">
       <div>
-        <input type="text" name="tasks[${idx}][task_name]" value="${prefill.task_name || ''}" placeholder="e.g. Create Authentication API" style="width:100%;">
+        <input type="text" name="tasks[${idx}][task_name]" value="${escapeHtml(prefill.task_name || '')}" placeholder="e.g. Create Authentication API" style="width:100%;">
       </div>
       <div>
-        <input type="text" name="tasks[${idx}][assigned_to]" list="task-member-datalist-${idx}" value="${prefill.assigned_to || ''}" placeholder="Select or enter assignee" style="width:100%;" autocomplete="off">
-        <datalist id="task-member-datalist-${idx}">
-          ${memberOptions}
-        </datalist>
+        <label class="task-field-label">Assignees</label>
+        <div class="assignee-multiselect" data-multiselect data-index="${idx}" data-members="${escapeHtml(JSON.stringify((team && team.members) || []))}">
+          <div class="assignee-control" data-control tabindex="0" role="button" aria-haspopup="listbox" aria-expanded="false" aria-label="Task assignees">
+            <span class="assignee-placeholder" data-placeholder>Assign to team members…</span>
+            <input type="text" class="assignee-search" data-search placeholder="" autocomplete="off" aria-label="Search team members">
+          </div>
+          <div class="assignee-menu" data-menu hidden></div>
+        </div>
+        <div class="assignee-tools">
+          <button type="button" onclick="selectAllAssignees(this)">Select all</button>
+          <button type="button" onclick="clearAssignees(this)">Clear</button>
+        </div>
       </div>
       <div>
         <select name="tasks[${idx}][priority]" style="width:100%;">
@@ -574,7 +637,7 @@
         </select>
       </div>
       <div>
-        <input type="number" step="0.01" min="0" name="tasks[${idx}][budget]" value="${prefill.budget || ''}" placeholder="e.g. 25,000 ETB" style="width:100%;">
+        <input type="number" step="0.01" min="0" name="tasks[${idx}][budget]" value="${escapeHtml(prefill.budget || '')}" placeholder="e.g. 25,000 ETB" style="width:100%;">
       </div>
       <div>
         <label class="task-field-label">Start date</label>
@@ -590,6 +653,190 @@
     `;
 
     rowsContainer.appendChild(row);
+
+    const widget = row.querySelector('[data-multiselect]');
+    if (widget) {
+      initAssigneeMultiselect(widget, prefill.user_ids || []);
+    }
+  }
+
+  /*
+   * Multi-select assignee picker: a checkbox list with removable user chips.
+   * Selected users are stored as tasks[<index>][user_ids][] hidden inputs so a
+   * task can be assigned to several team members at once.
+   */
+  function initAssigneeMultiselect(widget, preselectedIds = []) {
+    const index = widget.getAttribute('data-index');
+    let members = [];
+    try {
+      members = JSON.parse(widget.getAttribute('data-members') || '[]');
+    } catch (e) {
+      members = [];
+    }
+    members = members.filter(m => m && m.id);
+
+    widget.__members = members;
+    widget.__selected = new Set(members.map(m => String(m.id)).filter(id => preselectedIds.map(String).includes(id)));
+    widget.__closeHandler = function (e) {
+      if (!widget.contains(e.target)) closeAssigneeMenu(widget);
+    };
+
+    const control = widget.querySelector('[data-control]');
+    const menu = widget.querySelector('[data-menu]');
+    const search = widget.querySelector('[data-search]');
+
+    control.addEventListener('click', function (e) {
+      if (e.target.closest('.chip-remove')) return;
+      openAssigneeMenu(widget);
+      if (e.target === control || e.target.classList.contains('assignee-placeholder')) search.focus();
+    });
+
+    control.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        openAssigneeMenu(widget);
+        search.focus();
+      }
+    });
+
+    search.addEventListener('input', function () {
+      renderAssigneeOptions(widget, search.value);
+    });
+
+    document.addEventListener('click', widget.__closeHandler);
+
+    renderAssigneeChips(widget);
+  }
+
+  function openAssigneeMenu(widget) {
+    widget.classList.add('open');
+    widget.querySelector('[data-menu]').hidden = false;
+    widget.querySelector('[data-control]').setAttribute('aria-expanded', 'true');
+    renderAssigneeOptions(widget, widget.querySelector('[data-search]').value);
+  }
+
+  function closeAssigneeMenu(widget) {
+    widget.classList.remove('open');
+    widget.querySelector('[data-menu]').hidden = true;
+    widget.querySelector('[data-control]').setAttribute('aria-expanded', 'false');
+  }
+
+  function renderAssigneeOptions(widget, query = '') {
+    const menu = widget.querySelector('[data-menu]');
+    const selected = widget.__selected;
+    const needle = (query || '').trim().toLowerCase();
+
+    const matches = widget.__members.filter(m => !needle || String(m.name).toLowerCase().includes(needle));
+
+    if (!widget.__members.length) {
+      menu.innerHTML = '<div class="assignee-empty">No team members available for this team.</div>';
+      return;
+    }
+
+    if (!matches.length) {
+      menu.innerHTML = '<div class="assignee-empty">No member matches your search.</div>';
+      return;
+    }
+
+    menu.innerHTML = matches.map(m => `
+      <label class="assignee-option" data-user-id="${m.id}">
+        <input type="checkbox" value="${m.id}" ${selected.has(String(m.id)) ? 'checked' : ''}>
+        <span class="option-name">${escapeHtml(m.name)}</span>
+      </label>
+    `).join('');
+
+    menu.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener('change', function () {
+        toggleAssignee(widget, cb.value, cb.checked);
+      });
+    });
+  }
+
+  function toggleAssignee(widget, userId, isSelected) {
+    const id = String(userId);
+    if (isSelected) {
+      widget.__selected.add(id);
+    } else {
+      widget.__selected.delete(id);
+    }
+    renderAssigneeChips(widget);
+  }
+
+  function removeAssignee(button) {
+    const widget = button.closest('[data-multiselect]');
+    const userId = String(button.getAttribute('data-user-id'));
+    widget.__selected.delete(userId);
+    renderAssigneeChips(widget);
+
+    if (!widget.querySelector('[data-menu]').hidden) {
+      renderAssigneeOptions(widget, widget.querySelector('[data-search]').value);
+    }
+  }
+
+  function selectAllAssignees(button) {
+    const widget = button.closest('.task-row-item').querySelector('[data-multiselect]');
+    widget.__members.forEach(m => widget.__selected.add(String(m.id)));
+    renderAssigneeChips(widget);
+    if (!widget.querySelector('[data-menu]').hidden) {
+      renderAssigneeOptions(widget, widget.querySelector('[data-search]').value);
+    }
+  }
+
+  function clearAssignees(button) {
+    const widget = button.closest('.task-row-item').querySelector('[data-multiselect]');
+    widget.__selected.clear();
+    renderAssigneeChips(widget);
+    if (!widget.querySelector('[data-menu]').hidden) {
+      renderAssigneeOptions(widget, widget.querySelector('[data-search]').value);
+    }
+  }
+
+  function renderAssigneeChips(widget) {
+    const control = widget.querySelector('[data-control]');
+    const search = widget.querySelector('[data-search]');
+    const placeholder = widget.querySelector('[data-placeholder]');
+    const index = widget.getAttribute('data-index');
+
+    // Drop previously rendered chips and hidden inputs before re-rendering.
+    control.querySelectorAll('.assignee-chip').forEach(chip => chip.remove());
+    widget.querySelectorAll('input[name^="tasks["][name$="[user_ids][]"]').forEach(input => input.remove());
+
+    const selectedMembers = widget.__members.filter(m => widget.__selected.has(String(m.id)));
+
+    selectedMembers.forEach(m => {
+      const chip = document.createElement('span');
+      chip.className = 'assignee-chip';
+      chip.innerHTML = `<span class="chip-label">${escapeHtml(m.name)}</span>
+        <button type="button" class="chip-remove" data-user-id="${m.id}" title="Remove ${escapeHtml(m.name)}" aria-label="Remove ${escapeHtml(m.name)}">✕</button>`;
+      control.insertBefore(chip, search);
+    });
+
+    placeholder.style.display = selectedMembers.length ? 'none' : '';
+    search.placeholder = selectedMembers.length ? 'Add more…' : '';
+
+    selectedMembers.forEach(m => {
+      const hidden = document.createElement('input');
+      hidden.type = 'hidden';
+      hidden.name = `tasks[${index}][user_ids][]`;
+      hidden.value = m.id;
+      widget.appendChild(hidden);
+    });
+
+    control.querySelectorAll('.chip-remove').forEach(btn => {
+      btn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        removeAssignee(btn);
+      });
+    });
+  }
+
+  function assigneeNamesForRow(row) {
+    const widget = row.querySelector('[data-multiselect]');
+    if (!widget) return [];
+
+    return widget.__members
+      .filter(m => widget.__selected.has(String(m.id)))
+      .map(m => m.name);
   }
 
   function validateTaskDates(input) {
@@ -604,7 +851,12 @@
   }
 
   function removeTaskRow(button) {
-    button.closest('.task-row-item')?.remove();
+    const row = button.closest('.task-row-item');
+    const widget = row?.querySelector('[data-multiselect]');
+    if (widget && widget.__closeHandler) {
+      document.removeEventListener('click', widget.__closeHandler);
+    }
+    row?.remove();
   }
 
   function buildReviewAndNext() {
@@ -639,15 +891,14 @@
     taskRows.forEach(row => {
       const name = row.querySelector('[name*="[task_name]"]')?.value.trim();
       const teamId = parseInt(row.querySelector('[name*="[team_id]"]')?.value);
-      const assigneeInput = row.querySelector('[name*="[assigned_to]"]')?.value.trim();
-      const assigneeName = assigneeInput || 'Unassigned';
+      const assigneeNames = assigneeNamesForRow(row);
       const pri = row.querySelector('[name*="[priority]"]')?.value || 'Medium';
       const due = row.querySelector('[name*="[end_date]"]')?.value;
       const bgt = row.querySelector('[name*="[budget]"]')?.value;
 
       if (name && teamTasksMap[teamId]) {
         validTasksCount++;
-        teamTasksMap[teamId].tasks.push({ name, assignee: assigneeName, priority: pri, start: row.querySelector('[name*="[start_date]"]')?.value, due, budget: bgt });
+        teamTasksMap[teamId].tasks.push({ name, assignees: assigneeNames, priority: pri, start: row.querySelector('[name*="[start_date]"]')?.value, due, budget: bgt });
       }
     });
 
@@ -671,10 +922,12 @@
           <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:var(--bg-card); border:1px solid var(--line); border-radius:6px; margin-top:6px;">
             <div style="display:flex; align-items:center; gap:8px;">
               <span style="color:var(--accent);">✓</span>
-              <span style="font-weight:600; font-size:13.5px; color:var(--ink);">${t.name}</span>
+              <span style="font-weight:600; font-size:13.5px; color:var(--ink);">${escapeHtml(t.name)}</span>
             </div>
-            <div style="display:flex; align-items:center; gap:10px;">
-              <span style="font-size:12px; color:var(--ink-soft);">👤 ${t.assignee}</span>
+            <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:flex-end;">
+              ${t.assignees.length
+                ? t.assignees.map(a => `<span class="assignee-chip"><span class="chip-label">${escapeHtml(a)}</span></span>`).join('')
+                : `<span style="font-size:12px; color:var(--ink-muted);">👤 Unassigned</span>`}
               <span class="badge p-${t.priority.toLowerCase()}">${t.priority}</span>
               ${t.start ? `<span style="font-size:11.5px; color:var(--ink-muted);">Start ${t.start}</span>` : ''}
               ${t.due ? `<span style="font-size:11.5px; color:var(--ink-muted);">End ${t.due}</span>` : ''}
@@ -685,7 +938,7 @@
 
       block.innerHTML = `
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-          <span style="font-weight:700; font-size:14.5px; color:var(--ink);">${teamInfo.name}</span>
+          <span style="font-weight:700; font-size:14.5px; color:var(--ink);">${escapeHtml(teamInfo.name)}</span>
           <span class="badge b-active">${teamInfo.tasks.length} task(s)</span>
         </div>
         ${taskListHtml}
@@ -802,6 +1055,38 @@
     filterTeams();
   })();
 
+  /*
+   * Filter Project Managers by the selected Primary Office.
+   * Show all PMs with no office, plus PMs from the selected office.
+   */
+  (function () {
+    const officeSelect = document.getElementById('primary_office_id');
+    const pmSelect = document.getElementById('project_manager_id');
+    if (!officeSelect || !pmSelect) return;
+
+    function filterProjectManagers() {
+      const selectedOfficeId = officeSelect.value;
+      let selectionValid = false;
+
+      pmSelect.querySelectorAll('option').forEach(function (option) {
+        if (!option.value) return; // Skip placeholder
+
+        const optionOffice = option.getAttribute('data-office') || '';
+        // Show: no office restriction (global PMs) OR matching office
+        const visible = !optionOffice || optionOffice === selectedOfficeId;
+        option.hidden = !visible;
+        option.disabled = !visible;
+
+        if (visible && option.selected) selectionValid = true;
+      });
+
+      if (!selectionValid) pmSelect.value = '';
+    }
+
+    officeSelect.addEventListener('change', filterProjectManagers);
+    filterProjectManagers();
+  })();
+
   // Re-expose wizard functions globally so inline onclick handlers keep working.
   Object.assign(window, {
     goToStep,
@@ -813,6 +1098,9 @@
     toggleTeamSelection,
     addTaskRow,
     removeTaskRow,
+    removeAssignee,
+    selectAllAssignees,
+    clearAssignees,
     buildReviewAndNext,
     buildReviewSummary,
     finalizeWizard,

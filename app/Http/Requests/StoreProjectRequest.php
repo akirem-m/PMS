@@ -90,9 +90,12 @@ class StoreProjectRequest extends FormRequest
             'tasks.*.task_name' => ['nullable', 'string', 'max:150'],
             'tasks.*.team_id' => $teamRule,
             'tasks.*.assigned_to' => ['nullable', $userOfficeRule],
+            'tasks.*.user_ids' => ['nullable', 'array'],
+            'tasks.*.user_ids.*' => ['exists:users,user_id', $userOfficeRule],
             'tasks.*.priority' => ['nullable', 'in:Low,Medium,High,Urgent'],
             'tasks.*.status' => ['nullable', 'string'],
             'tasks.*.budget' => ['nullable', 'numeric', 'min:0'],
+            'tasks.*.start_date' => ['nullable', 'date'],
             'tasks.*.end_date' => ['nullable', 'date'],
             'tasks.*.description' => ['nullable', 'string'],
         ];

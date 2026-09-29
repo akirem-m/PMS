@@ -11,7 +11,7 @@ class TaskAssignment extends Model
     public $timestamps = false;
 
     protected $fillable = [
-        'task_id', 'user_id', 'status', 'assigned_at', 'responded_at', 'response_reason',
+        'task_id', 'user_id', 'role_label', 'acceptance_status', 'rejection_reason', 'assigned_by', 'assigned_at', 'responded_at',
     ];
 
     protected $casts = [

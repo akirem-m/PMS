@@ -68,12 +68,12 @@ class UserScopingContextTest extends TestCase
         $this->actingAs($admin)
             ->get(route('admin.users.index', ['office_id' => $officeA->office_id]))
             ->assertOk()
-            ->assertSee('Pending approvals: 2');
+            ->assertSee('2 pending approvals');
 
         $this->actingAs($admin)
             ->get(route('admin.users.index', ['office_id' => $officeB->office_id]))
             ->assertOk()
-            ->assertSee('Pending approvals: 1');
+            ->assertSee('1 pending approval');
     }
 
     public function test_non_admin_context_headers_follow_project_and_team_resources(): void

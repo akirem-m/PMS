@@ -17,14 +17,15 @@
 </div>
 
 {{--
-  User Access & Approvals is an organization-wide administration widget and
-  the links inside it all point at admin.users.index, which requires
-  manage_users. Restrict the card to that same permission so Office Heads,
-  Department Heads, Project Managers, Team Leads, and members never see an
-  "Action needed" prompt for users they cannot actually approve.
+  User Access & Approvals is an organization-wide administration widget.
+
+  This must be a strict role check, NOT @can('manage_users'): the Head of
+  Office and Head of Department roles are seeded with wildcard permissions
+  (Permissions::DEFAULT_ROLES => 'permissions' => '*'), so a permission check
+  evaluates true for them. The role names below are the only ones treated as
+  system administrators (see User::canAccessGlobalScope()).
 --}}
-@can('manage_users')
-  @if ($userApprovalStats)
+@if ($userApprovalStats && (auth()->user()->hasRole('Administrator') || auth()->user()->hasRole('Super Admin')))
   <!-- User Governance & Approval Section (Requirement 9) -->
   <div class="card card-pad" style="margin-bottom:20px; background:var(--surface); border:1px solid var(--line);">
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
@@ -59,9 +60,8 @@
       </a>
         </div>
      </div>
-      @endif
-    @endcan
-    @if ($officeStats)
+@endif
+@if ($officeStats)
 @php
   $ob = $officeStats['budget'];
   $obUtil = $ob['allocated'] > 0 ? min(100, round($ob['spent'] / $ob['allocated'] * 100)) : 0;

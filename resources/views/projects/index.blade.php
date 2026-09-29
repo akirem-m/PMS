@@ -14,15 +14,24 @@
 </div>
 
 <div class="filter-row">
-  @php $filterBase = request()->only(['status', 'priority', 'q', 'office']); @endphp
-  <a href="{{ route('projects.index', array_filter($filterBase)) }}"
-     class="pill {{ !request('type') ? 'active' : '' }}">All</a>
-  @foreach ($projectTypes as $type)
-    <a href="{{ route('projects.index', array_filter(array_merge($filterBase, ['type' => $type->name]))) }}"
-       class="pill {{ request('type') === $type->name ? 'active' : '' }}">{{ $type->name }}</a>
-  @endforeach
+  @php
+    $filterBase = request()->only(['status', 'priority', 'q', 'office']);
+    $activeOffice = $isAdmin ? request('office') : null;
+    $canFilterByOffice = $isAdmin && $offices->isNotEmpty();
+  @endphp
 
-  @can('manage_offices')
+  {{-- Project Type tabs: filtered by the active office, always plain names. --}}
+  <div class="filter-tabs" style="display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+    <a href="{{ route('projects.index', array_filter($filterBase)) }}"
+       class="pill {{ !request('type') ? 'active' : '' }}">All</a>
+    @foreach ($projectTypes as $type)
+      <a href="{{ route('projects.index', array_filter(array_merge($filterBase, ['type' => $type->name]))) }}"
+         class="pill {{ request('type') === $type->name ? 'active' : '' }}"
+         title="{{ $type->name }}">{{ $type->name }}</a>
+    @endforeach
+  </div>
+
+  @if ($canFilterByOffice)
     <form method="GET" action="{{ route('projects.index') }}" style="display:inline-flex; gap:8px; align-items:center; margin-left:auto;">
       @foreach (request()->only(['status', 'priority', 'q', 'type']) as $k => $v)
         @if ($v)<input type="hidden" name="{{ $k }}" value="{{ $v }}">@endif
@@ -34,7 +43,10 @@
         @endforeach
       </select>
     </form>
-  @endcan
+  @elseif ($activeOffice)
+    {{-- Non-admins cannot switch offices; show the scope they are pinned to. --}}
+    <span class="badge" style="margin-left:auto;">{{ optional($offices->firstWhere('office_id', (int) $activeOffice))->office_name ?? 'Your Office' }}</span>
+  @endif
 </div>
 
 <div class="card">

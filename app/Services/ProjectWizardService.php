@@ -11,6 +11,7 @@ use App\Models\ProjectMemberRole;
 use App\Models\ProjectType;
 use App\Models\Role;
 use App\Models\Task;
+use App\Models\TaskAssignment;
 use App\Models\TeamMember;
 use App\Models\User;
 use App\Support\Activity;
@@ -35,8 +36,11 @@ class ProjectWizardService
         /** @var User $user */
         $user = Auth::user();
 
-        if (! $user->office_id || (int) $request->input('primary_office_id') !== (int) $user->office_id) {
-            abort(422, 'Projects must be created under your assigned office.');
+        // Admins can create projects for any office. Other users must have an office and create within it.
+        if (! $user->canAccessGlobalScope()) {
+            if (! $user->office_id || (int) $request->input('primary_office_id') !== (int) $user->office_id) {
+                abort(422, 'Projects must be created under your assigned office.');
+            }
         }
 
         $pmInput = $request->input('project_manager_id') ?? $request->input('project_manager_name');
@@ -67,7 +71,12 @@ class ProjectWizardService
 
         if ($resolvedPmId) {
             $projectManager = User::find($resolvedPmId);
-            if (! $projectManager || (int) $projectManager->office_id !== (int) $user->office_id) {
+            // For non-admins, the project manager must belong to their office.
+            // For admins, project managers can belong to any office.
+            if (! $projectManager) {
+                abort(422, 'The selected Project Manager does not exist.');
+            }
+            if (! $user->canAccessGlobalScope() && (int) $projectManager->office_id !== (int) $user->office_id) {
                 abort(422, 'The Project Manager must belong to your office.');
             }
         }
@@ -175,11 +184,23 @@ class ProjectWizardService
                     }
 
                     $taskTeamId = ! empty($taskData['team_id']) ? (int) $taskData['team_id'] : $primaryTeamId;
-                    $assigneeId = null;
-                    if (! empty($taskData['assigned_to'])) {
-                        $assigneeId = $this->resolveUserId($taskData['assigned_to'], $taskTeamId);
+
+                    // A task may be assigned to several team members at once
+                    // (multi-select picker); legacy single-value payloads using
+                    // `assigned_to` keep working.
+                    $assigneeIds = collect($taskData['user_ids'] ?? [])
+                        ->push($taskData['assigned_to'] ?? null)
+                        ->map(fn ($id) => $this->resolveUserId($id, $taskTeamId))
+                        ->filter()
+                        ->map(fn ($id) => (int) $id)
+                        ->unique()
+                        ->values();
+
+                    foreach ($assigneeIds as $assigneeId) {
                         $assertUserAllowed($assigneeId);
                     }
+
+                    $assigneeId = $assigneeIds->first();
 
                     $status = $taskData['status'] ?? 'To Do';
                     if ($status === 'Pending') {
@@ -206,8 +227,21 @@ class ProjectWizardService
                         'progress' => in_array($status, ['Done', 'Completed']) ? 100 : 0,
                     ]);
 
-                    if ($task->assigned_to && (int) $task->assigned_to !== (int) $user->user_id) {
-                        Activity::notify($task->assigned_to, "You have been assigned: \"{$task->task_name}\" on {$project->project_name}", 'task');
+                    if ($assigneeIds->isNotEmpty()) {
+                        foreach ($assigneeIds as $assigneeId) {
+                            TaskAssignment::create([
+                                'task_id' => $task->task_id,
+                                'user_id' => $assigneeId,
+                                'role_label' => $assigneeId === $task->assigned_to ? 'Primary Assignee' : 'Contributor',
+                                'acceptance_status' => 'Pending Acceptance',
+                                'assigned_by' => $user->user_id,
+                                'assigned_at' => now(),
+                            ]);
+
+                            if ($assigneeId !== (int) $user->user_id) {
+                                Activity::notify($assigneeId, "You have been assigned: \"{$task->task_name}\" on {$project->project_name}", 'task');
+                            }
+                        }
                     }
                 }
 
@@ -249,8 +283,8 @@ class ProjectWizardService
     }
 
     /**
-     * Resolve a user ID or typed user name, creating a placeholder user
-     * when the name is not found (legacy behaviour).
+     * Resolve a user ID or a typed user name/e-mail to an existing user.
+     * Returns null when the input is empty or matches nobody.
      */
     public function resolveUserId(string|int|null $input, ?int $teamId = null): ?int
     {
@@ -279,47 +313,8 @@ class ProjectWizardService
             return $user->user_id;
         }
 
-        $user = User::where('full_name', 'LIKE', "%{$trimmed}%")->first();
-        if ($user) {
-            return $user->user_id;
-        }
-
-        $slug = strtolower(preg_replace('/[^a-zA-Z0-9]+/', '.', $trimmed));
-        $slug = trim($slug, '.');
-        if (empty($slug)) {
-            $slug = 'pm.'.rand(100, 999);
-        }
-
-        $email = $slug.'@example.com';
-        $counter = 1;
-        while (User::where('email', $email)->exists()) {
-            $email = $slug.$counter.'@example.com';
-            $counter++;
-        }
-
-        $newUser = User::create([
-            'full_name' => $trimmed,
-            'email' => $email,
-            'password_hash' => bcrypt('ChangeMe123!'),
-            'status' => 'Active',
-        ]);
-
-        $role = Role::where('role_name', 'Team Leader')->first() ?: Role::where('role_name', 'Team Member')->first();
-        if ($role) {
-            $newUser->roles()->attach($role->role_id);
-        }
-
-        if ($teamId) {
-            TeamMember::firstOrCreate([
-                'team_id' => $teamId,
-                'user_id' => $newUser->user_id,
-            ], [
-                'joined_date' => now()->toDateString(),
-            ]);
-        }
-
-        Activity::log('Created user for project leadership', 'User', $newUser->user_id, "{$newUser->full_name} ({$email})");
-
-        return $newUser->user_id;
+        // A free-text name that matches nothing is not a person: creating a
+        // placeholder user here would bypass every office restriction below.
+        return null;
     }
 }

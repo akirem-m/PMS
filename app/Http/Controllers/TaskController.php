@@ -243,7 +243,7 @@ class TaskController extends Controller
                 'id' => $assignment->task_assignment_id,
                 'user_id' => $assignment->user_id,
                 'name' => optional($assignment->user)->full_name,
-                'status' => $assignment->status,
+                'status' => $assignment->acceptance_status,
                 'can_respond' => (int) $assignment->user_id === (int) $user->user_id,
             ])->values(),
             'subtasks' => $this->serializeTaskTree($task->subtasks),

@@ -23,15 +23,25 @@ class ProjectPolicy
 
     /**
      * A user may view a project when they are a system administrator,
-     * or when the project sits under their office (primary or
-     * participating), or when they participate in the project itself:
-     * PM of record, member of an assigned team, or a direct project
-     * member role.
+     * or when they are the project manager, or when they are a head of office
+     * that manages the project's office(s), or when the project sits under
+     * their office (primary or participating), or when they participate in
+     * the project itself (assigned team, direct project role, etc.).
      */
     public function view(User $user, Project $project): bool
     {
         // System Administrators see everything.
-        if ($user->isAdmin()) {
+        if ($user->canAccessGlobalScope()) {
+            return true;
+        }
+
+        // Project Manager of record can view their projects.
+        if ($project->project_manager_id && (int) $project->project_manager_id === (int) $user->user_id) {
+            return true;
+        }
+
+        // Head of Office can view projects in their office.
+        if ($user->isOfficeHead() && $this->projectBelongsToHeadOffices($user, $project)) {
             return true;
         }
 
@@ -53,13 +63,23 @@ class ProjectPolicy
     }
 
     /**
-     * Editing mirrors isManagedBy(): organization edit_projects, the PM of
-     * record, a team leader with manage-level team assignment, or an
-     * explicit project role granting edit_projects. An office head may
-     * manage projects that belong to their own office(s) only.
+     * Editing is allowed for: system administrators, project managers of record,
+     * heads of office for projects in their office, team leaders with manage-level
+     * team assignment, or those with organization-level edit_projects permission.
      */
     public function update(User $user, Project $project): bool
     {
+        // System Administrators can edit everything.
+        if ($user->canAccessGlobalScope()) {
+            return true;
+        }
+
+        // Project Manager of record can edit their projects.
+        if ($project->project_manager_id && (int) $project->project_manager_id === (int) $user->user_id) {
+            return true;
+        }
+
+        // Head of Office can edit projects in their office.
         if ($user->isOfficeHead()) {
             return $this->projectBelongsToHeadOffices($user, $project);
         }
