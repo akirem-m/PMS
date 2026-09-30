@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Phase;
+use App\Models\Project;
 use Illuminate\Validation\ValidationException;
 
 class TaskBudgetAllocationService
@@ -44,6 +45,54 @@ class TaskBudgetAllocationService
             throw ValidationException::withMessages([
                 'budget' => sprintf(
                     'This task allocation exceeds the remaining phase budget of ETB %s.',
+                    number_format($remaining, 2)
+                ),
+            ]);
+        }
+    }
+
+    /**
+     * A task created at project level (no phase) draws on the project budget
+     * rather than a phase budget. Returns null when the project defines no
+     * budget, which means the allocation is unconstrained.
+     */
+    public function projectRemainingAmount(Project $project, ?int $ignoreTaskId = null): ?float
+    {
+        $project->loadMissing('budget');
+
+        if (! $project->budget) {
+            return null;
+        }
+
+        $budgetRemaining = (float) $project->budget->allocated_amount
+            - (float) $project->budget->spent_amount;
+
+        // Phase-less tasks are the ones this budget governs; phased tasks are
+        // already capped by their own phase budget.
+        $existingAllocations = (float) $project->tasks()
+            ->whereNull('phase_id')
+            ->when($ignoreTaskId, fn ($query) => $query->where('task_id', '!=', $ignoreTaskId))
+            ->sum('budget');
+
+        return max(0, $budgetRemaining - $existingAllocations);
+    }
+
+    public function assertProjectAllocationAllowed(Project $project, float|int|string|null $amount, ?int $ignoreTaskId = null): void
+    {
+        $amount = (float) ($amount ?? 0);
+
+        if ($amount < 0) {
+            throw ValidationException::withMessages([
+                'budget' => 'Task allocation cannot be negative.',
+            ]);
+        }
+
+        $remaining = $this->projectRemainingAmount($project, $ignoreTaskId);
+
+        if ($remaining !== null && $amount > $remaining) {
+            throw ValidationException::withMessages([
+                'budget' => sprintf(
+                    'This task allocation exceeds the remaining project budget of ETB %s.',
                     number_format($remaining, 2)
                 ),
             ]);

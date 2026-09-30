@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\Office;
 use App\Models\Payment;
 use App\Models\Phase;
+use App\Models\PhaseBudget;
 use App\Models\Project;
 use App\Models\ProjectBudget;
 use App\Models\Role;
@@ -27,7 +28,7 @@ class PmsImprovementsIntegrationTest extends TestCase
 
     public function test_office_parent_child_hierarchy_and_cycle_prevention(): void
     {
-        $admin = User::where('email', 'admin@example.com')->firstOrFail();
+        $admin = User::where('email', 'admin@pms.test')->firstOrFail();
 
         $headOffice = Office::create(['office_name' => 'HQ Central Office', 'office_code' => 'HQ01', 'unit_type' => 'Organization']);
         $regionalOffice = Office::create(['office_name' => 'Regional North Office', 'office_code' => 'RNO01', 'unit_type' => 'Regional Office', 'parent_office_id' => $headOffice->office_id]);
@@ -122,17 +123,17 @@ class PmsImprovementsIntegrationTest extends TestCase
     public function test_task_locking_prevents_unauthorized_terms_modification(): void
     {
         $director = User::where('email', 'director@example.com')->firstOrFail();
-        $michael = User::where('email', 'michael@example.com')->firstOrFail();
+        $assignee = User::where('email', 'david@example.com')->firstOrFail();
 
-        // Use a task where the assignee is NOT a project manager (Michael Brown on Create Product API)
+        // Use a task where the assignee is NOT a project manager (David Kim on Create Product API)
         $task = Task::where('task_name', 'Create Product API')->firstOrFail();
-        $this->assertEquals($michael->user_id, $task->assigned_to);
+        $this->assertEquals($assignee->user_id, $task->assigned_to);
 
-        $task->lock($michael->user_id, 'Locked upon user agreement');
+        $task->lock($assignee->user_id, 'Locked upon user agreement');
         $this->assertTrue($task->fresh()->isLocked());
 
         // Normal assigned user without admin/manager rights tries to alter agreed budget & description
-        $forbiddenResponse = $this->actingAs($michael)->putJson(route('tasks.update', $task), [
+        $forbiddenResponse = $this->actingAs($assignee)->putJson(route('tasks.update', $task), [
             'task_name' => 'Modified Name After Lock',
             'budget' => 999999,
             'description' => 'Tampered terms',
@@ -211,7 +212,7 @@ class PmsImprovementsIntegrationTest extends TestCase
 
     public function test_admin_dashboard_shows_user_approval_metrics(): void
     {
-        $admin = User::where('email', 'admin@example.com')->firstOrFail();
+        $admin = User::where('email', 'admin@pms.test')->firstOrFail();
 
         // Create pending and rejected users
         User::create(['full_name' => 'Pending Reg', 'email' => 'pending@test.com', 'password_hash' => bcrypt('test'), 'status' => 'Pending']);
@@ -265,7 +266,7 @@ class PmsImprovementsIntegrationTest extends TestCase
     public function test_complete_end_to_end_lifecycle_integration(): void
     {
         // 1. Organization / Office: Head Office & Child Department
-        $admin = User::where('email', 'admin@example.com')->firstOrFail();
+        $admin = User::where('email', 'admin@pms.test')->firstOrFail();
         $headOffice = Office::create([
             'office_name' => 'Jimma University Main Org',
             'office_code' => 'JUMO',
@@ -334,6 +335,13 @@ class PmsImprovementsIntegrationTest extends TestCase
             'status' => 'In Progress',
             'start_date' => now()->toDateString(),
             'end_date' => now()->addWeeks(2)->toDateString(),
+        ]);
+        // Task and subtask budgets are capped by the owning phase's budget, so
+        // a phase has to be funded before it can carry allocation.
+        PhaseBudget::create([
+            'phase_id' => $phase->phase_id,
+            'allocated_amount' => 150000,
+            'spent_amount' => 0,
         ]);
 
         // 5. Task & Multiple Assignees
@@ -410,7 +418,10 @@ class PmsImprovementsIntegrationTest extends TestCase
         $this->assertEquals(40000, $project->fresh()->calculateTotalCost());
         $this->assertGreaterThanOrEqual(40000, $task->fresh()->totalCost());
 
-        $reportRes = $this->actingAs($director)->get(route('reports.index'));
+        // Report visibility is office-scoped, and this project belongs to the
+        // newly created Engineering Department rather than the seeded
+        // director's office, so the org-wide view is the administrator's.
+        $reportRes = $this->actingAs($admin)->get(route('reports.index'));
         $reportRes->assertOk();
         $reportRes->assertSee('Student Portal System');
     }

@@ -47,6 +47,22 @@ class Phase extends Model
         return $this->hasMany(Payment::class, 'phase_id', 'phase_id');
     }
 
+    /**
+     * Phase funds still available for new expenditures. Reserved covers every
+     * payment that is not Cancelled (completed spend plus submissions pending
+     * approval or disbursement) so a worker cannot over-commit the budget
+     * while an approval is in flight.
+     */
+    public function remainingExpenseBudget(): float
+    {
+        $allocated = (float) ($this->budget?->allocated_amount ?? 0);
+        $reserved = (float) $this->payments()
+            ->whereIn('payment_status', ['Pending', 'Approved', 'Completed'])
+            ->sum('amount');
+
+        return max(0, $allocated - $reserved);
+    }
+
     public function totalPayments(): float
     {
         return (float) $this->payments()->where('payment_status', 'Completed')->sum('amount');

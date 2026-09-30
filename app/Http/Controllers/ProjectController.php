@@ -21,6 +21,7 @@ use App\Services\ProjectWizardService;
 use App\Services\RosterService;
 use App\Services\TaskBudgetAllocationService;
 use App\Support\Activity;
+use App\Support\ProjectOfficeRules;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
@@ -268,23 +269,21 @@ class ProjectController extends Controller
                         });
                     }),
                 ],
-                'project_manager_id' => [
-                    'nullable',
-                    Rule::exists('users', 'user_id')->where(function ($query) use ($user) {
-                        $query->where('status', 'Active')->where('office_id', $user->office_id);
-                    }),
-                ],
+                'project_manager_id' => ['nullable', ProjectOfficeRules::directoryUser($user)],
+                'project_manager_name' => ['nullable', ProjectOfficeRules::directoryUser($user)],
                 'priority' => ['nullable', 'in:Low,Medium,High,Urgent'],
                 'start_date' => ['nullable', 'date'],
                 'end_date' => ['nullable', 'date', 'after_or_equal:start_date'],
                 'allocated_amount' => ['nullable', 'numeric', 'min:0'],
-                'primary_office_id' => [
-                    'required',
-                    Rule::exists('offices', 'office_id')->where('office_id', $user->office_id),
-                ],
+                'primary_office_id' => ['required', ProjectOfficeRules::primaryOffice($user)],
                 'participating_offices' => ['nullable', 'array'],
                 'participating_offices.*' => ['exists:offices,office_id'],
             ]);
+
+            // The picker accepts an id, an e-mail or a typed name; names are
+            // resolved (and, when new, created) before the column is written.
+            $pmInput = $request->input('project_manager_id') ?? $request->input('project_manager_name');
+            $resolvedPmId = $this->projectWizardService->resolveUserId($pmInput, $request->input('team_id'));
 
             $project = $projectId ? Project::findOrFail($projectId) : new Project;
             $project->fill([
@@ -293,7 +292,7 @@ class ProjectController extends Controller
                 'client' => $data['client'] ?? null,
                 'project_type' => $data['project_type'] ?? optional(ProjectType::find($data['project_type_id'] ?? null))->name ?? 'Software',
                 'project_type_id' => $this->resolveProjectTypeId($data),
-                'project_manager_id' => $data['project_manager_id'] ?? null,
+                'project_manager_id' => $resolvedPmId,
                 'priority' => $data['priority'] ?? 'Medium',
                 'start_date' => $data['start_date'] ?? null,
                 'end_date' => $data['end_date'] ?? null,

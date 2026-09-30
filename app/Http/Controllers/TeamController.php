@@ -3,11 +3,10 @@
 namespace App\Http\Controllers;
 
 use App\Models\Office;
-use App\Models\Role;
 use App\Models\Team;
 use App\Models\TeamMember;
 use App\Models\User;
-use App\Services\OrgHierarchyService;
+use App\Services\UserResolver;
 use App\Support\Activity;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -274,95 +273,23 @@ class TeamController extends Controller
                 || (int) $team->office_id === (int) $candidate->office_id);
     }
 
+    /**
+     * Canonical team authorization lives in TeamPolicy; delegating here keeps
+     * the route middleware (`can:view_projects` / `can:update,team`) and the
+     * controller-side checks from drifting apart and denying authorized roles.
+     */
     private function canViewTeam(User $user, Team $team): bool
     {
-        if ($user->isAdmin()) {
-            return true;
-        }
-
-        if ($user->office_id && $team->office_id && (int) $user->office_id !== (int) $team->office_id) {
-            return false;
-        }
-
-        if ($user->isOfficeHead()) {
-            return app(OrgHierarchyService::class)->canManage($user, $team)
-                && ($user->office_id === null || $user->headOfficeIds()->contains((int) $user->office_id));
-        }
-
-        return ! $user->isTeamMember()
-            || $team->members()->where('user_id', $user->user_id)->exists();
+        return $user->can('view', $team);
     }
 
+    /**
+     * Resolution (and, for a typed name, creation) of team members and leads
+     * lives in UserResolver so every form agrees on what a name means.
+     */
     private function resolveUserId($input, ?int $teamId = null): ?int
     {
-        if ($input === null || $input === '') {
-            return null;
-        }
-
-        if (is_numeric($input)) {
-            $user = User::find((int) $input);
-            if ($user) {
-                return $user->user_id;
-            }
-        }
-
-        $trimmed = trim((string) $input);
-        if ($trimmed === '' || $trimmed === '— Select Member —' || $trimmed === '— Select Team Lead —' || $trimmed === 'None') {
-            return null;
-        }
-
-        $user = User::where('email', $trimmed)
-            ->orWhere('full_name', $trimmed)
-            ->orWhereRaw('LOWER(full_name) = ?', [strtolower($trimmed)])
-            ->first();
-
-        if ($user) {
-            return $user->user_id;
-        }
-
-        $user = User::where('full_name', 'LIKE', "%{$trimmed}%")->first();
-        if ($user) {
-            return $user->user_id;
-        }
-
-        $slug = strtolower(preg_replace('/[^a-zA-Z0-9]+/', '.', $trimmed));
-        $slug = trim($slug, '.');
-        if (empty($slug)) {
-            $slug = 'member.'.rand(100, 999);
-        }
-
-        $email = $slug.'@example.com';
-        $counter = 1;
-        while (User::where('email', $email)->exists()) {
-            $email = $slug.$counter.'@example.com';
-            $counter++;
-        }
-
-        $newUser = User::create([
-            'full_name' => $trimmed,
-            'email' => $email,
-            'password_hash' => bcrypt('ChangeMe123!'),
-            'status' => 'Active',
-            'department' => 'Staff',
-        ]);
-
-        $role = Role::where('role_name', 'Team Member')->first();
-        if ($role) {
-            $newUser->roles()->attach($role->role_id);
-        }
-
-        if ($teamId) {
-            TeamMember::firstOrCreate([
-                'team_id' => $teamId,
-                'user_id' => $newUser->user_id,
-            ], [
-                'joined_date' => now()->toDateString(),
-            ]);
-        }
-
-        Activity::log('Created team member', 'User', $newUser->user_id, "{$newUser->full_name} ({$email})");
-
-        return $newUser->user_id;
+        return app(UserResolver::class)->resolve($input, $teamId);
     }
 
     private function canCreateTeams(): bool
@@ -375,29 +302,12 @@ class TeamController extends Controller
     /**
      * Standardized on TeamPolicy hierarchical leadership: creating a team is
      * an org-structure change, so it stays restricted to org-wide managers,
-     * but team management now accepts any leadership role up the chain
+     * but team management accepts any leadership role up the chain
      * (Team Lead -> Project Manager -> Office Head -> Department Head)
      * instead of the raw manage_team gate alone.
      */
     private function canManageTeam(User $user, Team $team): bool
     {
-        if ($user->isAdmin()) {
-            return true;
-        }
-
-        if ($user->isOfficeHead()) {
-            return app(OrgHierarchyService::class)->canManage($user, $team)
-                && ($user->office_id === null || $user->headOfficeIds()->contains((int) $user->office_id));
-        }
-
-        if (app(OrgHierarchyService::class)->canManage($user, $team)) {
-            return true;
-        }
-
-        if (! $user->can('manage_team')) {
-            return false;
-        }
-
-        return (int) $team->team_leader_id === (int) $user->user_id;
+        return $user->can('update', $team) || $user->can('manageMembers', $team);
     }
 }

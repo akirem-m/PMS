@@ -76,9 +76,17 @@ class TaskPolicy
         return $user->isDirectorOrAdmin();
     }
 
+    /**
+     * Reassignment is authorized like any other manage-level action. The
+     * agreement lock protects the assignee list as an agreed term, so it is
+     * enforced here — but only against callers who cannot override locked
+     * terms. Blanket-denying a locked task made the controller's own
+     * modifyLocked override unreachable for the managers who are supposed to
+     * hold it.
+     */
     public function assign(User $user, Task $task): bool
     {
-        if ($task->is_locked) {
+        if ($task->is_locked && ! $this->modifyLocked($user, $task)) {
             return false;
         }
 
@@ -92,14 +100,60 @@ class TaskPolicy
         return $user->hasPermission('assign_tasks');
     }
 
-    /** Status transitions: the assignee, or anyone who manages the project. */
+    /**
+     * Status transitions follow delivery participation, not the agreement
+     * lock. An accepted assignee may always move the task between To Do,
+     * In Progress, In Review and Completed — including on a task whose agreed
+     * terms are locked. A user who still owes an accept/reject response is
+     * blocked until they respond (locked-term overriders aside), and anyone
+     * managing the task keeps their authority.
+     */
     public function updateStatus(User $user, Task $task): bool
     {
-        if ($task->is_locked) {
+        $assignment = $task->assignmentFor((int) $user->user_id);
+
+        if ($assignment?->isPending() && ! $this->modifyLocked($user, $task)) {
             return false;
         }
 
+        if ($assignment?->isAccepted() || $this->managesTask($user, $task)) {
+            return true;
+        }
+
         return $this->update($user, $task);
+    }
+
+    /**
+     * Adding, toggling, and deleting subtasks follows the same participation
+     * rule as status updates so assigned members can keep their checklist
+     * current without unlocking the agreed terms.
+     */
+    public function manageSubtasks(User $user, Task $task): bool
+    {
+        return $this->updateStatus($user, $task) || $this->update($user, $task);
+    }
+
+    /**
+     * Authority over a task's delivery state: project manager, office head,
+     * department head, team lead, or an organization-wide project editor.
+     * Deliberately independent of the agreement lock, which protects the
+     * agreed terms (name/budget/dates/assignees), not day-to-day progress.
+     */
+    protected function managesTask(User $user, Task $task): bool
+    {
+        if ($user->canAccessGlobalScope()) {
+            return true;
+        }
+
+        if ($this->leadsOrOversees($user, $task)) {
+            return true;
+        }
+
+        $project = $task->project ?? optional($task->phase)->project;
+
+        return $project
+            ? $project->isManagedBy($user)
+            : $user->hasPermission('edit_projects');
     }
 
     /** Only assignees can accept/reject their assignment on a task. */

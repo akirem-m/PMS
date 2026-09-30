@@ -4,9 +4,10 @@ namespace App\Http\Requests;
 
 use App\Models\Team;
 use App\Models\User;
+use App\Services\UserResolver;
+use App\Support\ProjectOfficeRules;
 use Closure;
 use Illuminate\Foundation\Http\FormRequest;
-use Illuminate\Validation\Rule;
 
 class StoreProjectRequest extends FormRequest
 {
@@ -21,7 +22,7 @@ class StoreProjectRequest extends FormRequest
      */
     public function rules(): array
     {
-        $creatorOfficeId = (int) ($this->user()?->office_id ?? 0);
+        $creator = $this->user();
 
         // Teams must belong to the project's primary or participating offices.
         $allowedOfficeIds = collect([(int) $this->input('primary_office_id')])
@@ -50,12 +51,16 @@ class StoreProjectRequest extends FormRequest
         ];
 
         $userOfficeRule = function (string $attribute, mixed $value, Closure $fail) use ($allowedOfficeIds): void {
-            $user = User::find((int) $value);
+            $user = $this->resolveUserInput($value);
             if ($user && ! $user->isGlobal() && $allowedOfficeIds->isNotEmpty() && $user->office_id
                 && ! $allowedOfficeIds->contains((int) $user->office_id)) {
                 $fail("The selected user's office is not one of this project's offices.");
             }
         };
+
+        // Project manager / member fields accept a user id, an e-mail address
+        // or a typed name; see ProjectOfficeRules for the shared boundary.
+        $directoryUserRule = ProjectOfficeRules::directoryUser($creator);
 
         return [
             'project_name' => ['required', 'string', 'max:150'],
@@ -63,16 +68,9 @@ class StoreProjectRequest extends FormRequest
             'client' => ['nullable', 'string', 'max:150'],
             'project_type' => ['nullable', 'string', 'max:100'],
             'project_type_id' => ['nullable', 'exists:project_types,project_type_id'],
-            'primary_office_id' => [
-                'required',
-                Rule::exists('offices', 'office_id')->where('office_id', $creatorOfficeId),
-            ],
-            'project_manager_id' => [
-                'nullable',
-                Rule::exists('users', 'user_id')->where(function ($query) use ($creatorOfficeId) {
-                    $query->where('status', 'Active')->where('office_id', $creatorOfficeId);
-                }),
-            ],
+            'primary_office_id' => ['required', ProjectOfficeRules::primaryOffice($creator)],
+            'project_manager_id' => ['nullable', $directoryUserRule],
+            'project_manager_name' => ['nullable', $directoryUserRule],
             'team_id' => ['nullable', ...$teamRule],
             'team_ids' => ['nullable', 'array'],
             'team_ids.*' => $teamRule,
@@ -83,7 +81,8 @@ class StoreProjectRequest extends FormRequest
             'end_date' => ['nullable', 'date', 'after_or_equal:start_date'],
             'allocated_amount' => ['nullable', 'numeric', 'min:0'],
             'members' => ['nullable', 'array'],
-            'members.*.user_id' => ['nullable', 'exists:users,user_id', $userOfficeRule],
+            'members.*.user_id' => ['nullable', $directoryUserRule, $userOfficeRule],
+            'members.*.user_name' => ['nullable', $directoryUserRule, $userOfficeRule],
             'members.*.role_id' => ['nullable', 'exists:roles,role_id'],
             'members.*.specialty' => ['nullable', 'string', 'max:100'],
             'tasks' => ['nullable', 'array'],
@@ -91,7 +90,7 @@ class StoreProjectRequest extends FormRequest
             'tasks.*.team_id' => $teamRule,
             'tasks.*.assigned_to' => ['nullable', $userOfficeRule],
             'tasks.*.user_ids' => ['nullable', 'array'],
-            'tasks.*.user_ids.*' => ['exists:users,user_id', $userOfficeRule],
+            'tasks.*.user_ids.*' => ['nullable', $directoryUserRule, $userOfficeRule],
             'tasks.*.priority' => ['nullable', 'in:Low,Medium,High,Urgent'],
             'tasks.*.status' => ['nullable', 'string'],
             'tasks.*.budget' => ['nullable', 'numeric', 'min:0'],
@@ -99,5 +98,18 @@ class StoreProjectRequest extends FormRequest
             'tasks.*.end_date' => ['nullable', 'date'],
             'tasks.*.description' => ['nullable', 'string'],
         ];
+    }
+
+    /**
+     * Look up a submitted user value (id, e-mail or name) without creating
+     * anything: validation must never have side effects.
+     */
+    private function resolveUserInput(mixed $value): ?User
+    {
+        if ($value === null || $value === '' || is_array($value)) {
+            return null;
+        }
+
+        return app(UserResolver::class)->find($value);
     }
 }

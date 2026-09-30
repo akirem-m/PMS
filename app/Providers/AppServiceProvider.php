@@ -5,14 +5,17 @@ namespace App\Providers;
 use App\Models\ChangeRequest;
 use App\Models\Department;
 use App\Models\Office;
+use App\Models\Payment;
 use App\Models\Phase;
 use App\Models\Project;
 use App\Models\Task;
 use App\Models\Team;
 use App\Models\User;
 use App\Policies\OfficePolicy;
+use App\Policies\PaymentPolicy;
 use App\Policies\ProjectPolicy;
 use App\Policies\TaskPolicy;
+use App\Policies\TeamPolicy;
 use App\Services\RbacService;
 use App\Support\Permissions;
 use Illuminate\Pagination\Paginator;
@@ -33,7 +36,7 @@ class AppServiceProvider extends ServiceProvider
         // infinite recursion. Check the RBAC engine / role directly instead.
         $rbac = app(RbacService::class);
 
-        Gate::before(function (User $user, string $ability) use ($rbac): ?bool {
+        Gate::before(function (User $user, string $ability): ?bool {
             // Only org-wide (unscoped, non-leadership) roles may bypass the
             // Gate. Checking the RBAC engine here would let scoped roles
             // like "Head of Office" (permission set: *) bypass every
@@ -77,8 +80,15 @@ class AppServiceProvider extends ServiceProvider
         }
 
         // Explicit policy registrations for object-level authorization.
+        // TeamPolicy and PaymentPolicy MUST be registered explicitly: the
+        // `can:update,team` / `can:manageMembers,team` route middleware and
+        // the `can('approve'|'disburse', $payment)` checks resolve through
+        // these registrations, and without them every non-admin request to
+        // /teams/{team}/edit and /payments was denied.
         Gate::policy(Project::class, ProjectPolicy::class);
         Gate::policy(Task::class, TaskPolicy::class);
+        Gate::policy(Team::class, TeamPolicy::class);
+        Gate::policy(Payment::class, PaymentPolicy::class);
         Gate::policy(Office::class, OfficePolicy::class);
 
         // The app ships custom CSS only (no Tailwind), so Laravel's default

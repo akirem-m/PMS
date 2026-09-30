@@ -100,9 +100,23 @@ class ProjectPolicy
                 : $project->isManagedBy($user));
     }
 
-    /** True when the project's primary or participating offices intersect the offices this user heads. */
+    /**
+     * True when the project's primary or participating offices intersect the
+     * offices this user heads. Office scope: a Head of Office manages every
+     * project whose `primary_office_id` (or participation) matches their own
+     * office, even when the role was granted without an explicit scope row.
+     *
+     * Callers gate this behind `$user->isOfficeHead()`, so it never widens
+     * authority for any other role.
+     */
     protected function projectBelongsToHeadOffices(User $user, Project $project): bool
     {
+        if ($project->primary_office_id
+            && $user->office_id
+            && (int) $project->primary_office_id === (int) $user->office_id) {
+            return true;
+        }
+
         $headOfficeIds = $user->headOfficeIds();
 
         if ($headOfficeIds->isEmpty()) {

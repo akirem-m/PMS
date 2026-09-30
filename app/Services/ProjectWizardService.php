@@ -9,10 +9,8 @@ use App\Models\Project;
 use App\Models\ProjectBudget;
 use App\Models\ProjectMemberRole;
 use App\Models\ProjectType;
-use App\Models\Role;
 use App\Models\Task;
 use App\Models\TaskAssignment;
-use App\Models\TeamMember;
 use App\Models\User;
 use App\Support\Activity;
 use Illuminate\Support\Facades\Auth;
@@ -283,38 +281,13 @@ class ProjectWizardService
     }
 
     /**
-     * Resolve a user ID or a typed user name/e-mail to an existing user.
-     * Returns null when the input is empty or matches nobody.
+     * Resolve a user ID, e-mail or typed name to a user id, creating an
+     * unprivileged placeholder for a name that matches nobody. Delegates to
+     * UserResolver so the project, team and task forms agree on what a typed
+     * name means.
      */
     public function resolveUserId(string|int|null $input, ?int $teamId = null): ?int
     {
-        if ($input === null || $input === '') {
-            return null;
-        }
-
-        if (is_numeric($input)) {
-            $user = User::find((int) $input);
-            if ($user) {
-                return $user->user_id;
-            }
-        }
-
-        $trimmed = trim((string) $input);
-        if ($trimmed === '' || $trimmed === '— Select Project Manager —' || $trimmed === 'None') {
-            return null;
-        }
-
-        $user = User::where('email', $trimmed)
-            ->orWhere('full_name', $trimmed)
-            ->orWhereRaw('LOWER(full_name) = ?', [strtolower($trimmed)])
-            ->first();
-
-        if ($user) {
-            return $user->user_id;
-        }
-
-        // A free-text name that matches nothing is not a person: creating a
-        // placeholder user here would bypass every office restriction below.
-        return null;
+        return app(UserResolver::class)->resolve($input, $teamId);
     }
 }

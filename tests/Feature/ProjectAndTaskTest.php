@@ -17,18 +17,34 @@ class ProjectAndTaskTest extends TestCase
 {
     use RefreshDatabase;
 
+    /**
+     * The seeder creates one demo project per project type, so the sample
+     * project these tests describe has to be looked up by name rather than
+     * assumed to be the first row.
+     */
+    private function sampleProject(): Project
+    {
+        return Project::where('project_name', 'Sample PMS')->firstOrFail();
+    }
+
+    /** A team that belongs to the given user's own office. */
+    private function officeTeam(User $user): Team
+    {
+        return Team::where('office_id', $user->office_id)->firstOrFail();
+    }
+
     public function test_seeder_creates_and_updates_project_and_task(): void
     {
         $this->seed(DatabaseSeeder::class);
 
-        $project = Project::first();
-        $this->assertNotNull($project);
-        $this->assertEquals('Sample PMS', $project->project_name);
+        $project = $this->sampleProject();
         $this->assertEquals('active', $project->status);
 
-        $task = Task::first();
-        $this->assertNotNull($task);
-        $this->assertEquals('Requirements Gathering', $task->task_name);
+        // Look the task up by name: the seeder also creates one demo project
+        // per project type, so Task::first() is not this sample's task.
+        $task = Task::where('project_id', $project->project_id)
+            ->where('task_name', 'Requirements Gathering')
+            ->firstOrFail();
         $this->assertEquals('In Progress', $task->status);
     }
 
@@ -37,12 +53,13 @@ class ProjectAndTaskTest extends TestCase
         $this->seed(DatabaseSeeder::class);
 
         $director = User::where('email', 'director@example.com')->first();
-        $team = Team::first();
+        $team = $this->officeTeam($director);
 
         $response = $this->actingAs($director)->post(route('projects.store'), [
             'project_name' => 'New Client Portal',
             'description' => 'A new portal for staff',
             'project_type' => 'Software',
+            'primary_office_id' => $director->office_id,
             'team_id' => $team->team_id,
             'start_date' => now()->toDateString(),
             'end_date' => now()->addMonths(3)->toDateString(),
@@ -75,8 +92,8 @@ class ProjectAndTaskTest extends TestCase
         $this->seed(DatabaseSeeder::class);
 
         $director = User::where('email', 'director@example.com')->first();
-        $project = Project::first();
-        $phase = Phase::where('project_id', $project->project_id)->first();
+        $project = $this->sampleProject();
+        $phase = $project->phases()->firstOrFail();
 
         $startDate = now()->toDateString();
         $endDate = now()->addDays(10)->toDateString();
@@ -153,8 +170,8 @@ class ProjectAndTaskTest extends TestCase
         $this->seed(DatabaseSeeder::class);
 
         $director = User::where('email', 'director@example.com')->first();
-        $project = Project::first();
-        $phase = Phase::where('project_id', $project->project_id)->first();
+        $project = $this->sampleProject();
+        $phase = $project->phases()->firstOrFail();
 
         $createResponse = $this->actingAs($director)->post(route('tasks.store'), [
             'phase_id' => $phase->phase_id,
@@ -180,13 +197,14 @@ class ProjectAndTaskTest extends TestCase
         $this->seed(DatabaseSeeder::class);
 
         $director = User::where('email', 'director@example.com')->first();
-        $team = Team::first();
+        $team = $this->officeTeam($director);
 
         // 1. Create project
         $createResponse = $this->actingAs($director)->post(route('projects.store'), [
             'project_name' => 'Flash Test Project',
             'description' => 'Test project for flash alerts',
             'project_type' => 'Software',
+            'primary_office_id' => $director->office_id,
             'team_id' => $team->team_id,
             'start_date' => now()->toDateString(),
             'end_date' => now()->addMonths(2)->toDateString(),
@@ -217,8 +235,8 @@ class ProjectAndTaskTest extends TestCase
         $this->seed(DatabaseSeeder::class);
 
         $director = User::where('email', 'director@example.com')->first();
-        $project = Project::first();
-        $phase = $project->phases()->first();
+        $project = $this->sampleProject();
+        $phase = $project->phases()->firstOrFail();
 
         // Update phase status
         $statusResponse = $this->actingAs($director)->post(route('phases.status', $phase), [
@@ -245,12 +263,11 @@ class ProjectAndTaskTest extends TestCase
         $this->seed(DatabaseSeeder::class);
 
         $director = User::where('email', 'director@example.com')->first();
-        $project = Project::first();
-        $phases = $project->phases()->get();
-        $phase1 = $phases[0];
-        $phase2 = $phases[1];
+        $project = $this->sampleProject();
+        $phase1 = $project->phases()->orderBy('sequence_order')->firstOrFail();
+        $phase2 = $project->phases()->where('phase_id', '!=', $phase1->phase_id)->firstOrFail();
 
-        $task = Task::first();
+        $task = Task::where('project_id', $project->project_id)->firstOrFail();
         $task->update(['phase_id' => $phase1->phase_id]);
 
         $updateResponse = $this->actingAs($director)->put(route('tasks.update', $task), [
@@ -265,9 +282,9 @@ class ProjectAndTaskTest extends TestCase
         $this->seed(DatabaseSeeder::class);
 
         $director = User::where('email', 'director@example.com')->first();
-        $project = Project::first();
+        $project = $this->sampleProject();
         $team = $project->team;
-        $phase = $project->phases()->first();
+        $phase = $project->phases()->firstOrFail();
 
         // 1. Update Project Budget
         $projectBudgetResponse = $this->actingAs($director)->post(route('budgets.projects.update', $project), [
@@ -356,12 +373,13 @@ class ProjectAndTaskTest extends TestCase
         $chaltu = User::where('email', 'chaltu@example.com')->first();
         $caala = User::where('email', 'caala@example.com')->first();
         $john = User::where('email', 'john@example.com')->first();
-        $team = Team::where('team_name', 'Software Engineering')->first();
+        $team = Team::where('team_name', 'Software Engineering')->firstOrFail();
 
         $response = $this->actingAs($director)->post(route('projects.store'), [
             'project_name' => 'Enterprise Resource Planning System',
             'description' => 'Comprehensive company ERP system',
             'project_type' => 'Software',
+            'primary_office_id' => $director->office_id,
             'team_id' => $team->team_id,
             'project_manager_id' => $abebe->user_id,
             'start_date' => now()->toDateString(),
@@ -406,13 +424,14 @@ class ProjectAndTaskTest extends TestCase
     {
         $this->seed(DatabaseSeeder::class);
 
-        $abebe = User::where('email', 'abebe@example.com')->first();
-        $project = Project::where('project_name', 'Sample PMS')->first();
+        // Sample PMS is managed by its seeded project manager of record.
+        $pm = User::where('email', 'john.smith@example.com')->firstOrFail();
+        $project = $this->sampleProject();
 
-        $this->assertTrue($project->isManagedBy($abebe));
+        $this->assertTrue($project->isManagedBy($pm));
 
-        $phase = $project->phases->first();
-        $response = $this->actingAs($abebe)->post(route('tasks.store'), [
+        $phase = $project->phases()->firstOrFail();
+        $response = $this->actingAs($pm)->post(route('tasks.store'), [
             'phase_id' => $phase->phase_id,
             'task_name' => 'PM Created Task',
             'priority' => 'High',
@@ -464,8 +483,8 @@ class ProjectAndTaskTest extends TestCase
         $this->seed(DatabaseSeeder::class);
 
         $director = User::where('email', 'director@example.com')->first();
-        $project = Project::first();
-        $phase = $project->phases->first();
+        $project = $this->sampleProject();
+        $phase = $project->phases()->firstOrFail();
 
         // Assign to a new person "Dawit Bekele" who was not originally in the database
         $response = $this->actingAs($director)->post(route('tasks.store'), [
@@ -493,13 +512,14 @@ class ProjectAndTaskTest extends TestCase
         $this->seed(DatabaseSeeder::class);
 
         $director = User::where('email', 'director@example.com')->first();
-        $team = Team::first();
+        $team = $this->officeTeam($director);
 
         // Create project typing new PM name "Hana Girma"
         $response = $this->actingAs($director)->post(route('projects.store'), [
             'project_name' => 'Custom PM Project',
             'description' => 'Project with custom PM name',
             'project_type' => 'Software',
+            'primary_office_id' => $director->office_id,
             'team_id' => $team->team_id,
             'project_manager_id' => 'Hana Girma',
         ]);

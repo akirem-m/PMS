@@ -121,7 +121,36 @@ class Task extends Model
     public function collaborators()
     {
         return $this->belongsToMany(User::class, 'task_assignments', 'task_id', 'user_id')
-            ->withPivot('task_assignment_id', 'status', 'assigned_at', 'responded_at', 'response_reason');
+            ->withPivot('task_assignment_id', 'role_label', 'acceptance_status', 'rejection_reason', 'assigned_at', 'responded_at');
+    }
+
+    /**
+     * Acceptance decision of one user on this task, if they hold an
+     * assignment row. Returns null when the user is not an assignee.
+     */
+    public function assignmentFor(?int $userId): ?TaskAssignment
+    {
+        if (! $userId) {
+            return null;
+        }
+
+        if ($this->relationLoaded('assignments')) {
+            return $this->assignments->firstWhere('user_id', $userId);
+        }
+
+        return $this->assignments()->where('user_id', $userId)->first();
+    }
+
+    /** True when at least one assignee still owes an accept/reject response. */
+    public function hasPendingAcceptance(): bool
+    {
+        if ($this->relationLoaded('assignments')) {
+            return $this->assignments->contains(fn (TaskAssignment $assignment) => $assignment->isPending());
+        }
+
+        return $this->assignments()
+            ->whereIn('acceptance_status', [TaskAssignment::STATUS_PENDING, 'pending'])
+            ->exists();
     }
 
     public function payments()
@@ -145,8 +174,10 @@ class Task extends Model
             return true;
         }
 
-        return in_array($this->status, ['Accepted', 'In Progress', 'Completed', 'Done'])
-            && $this->assignments()->where('acceptance_status', 'Accepted')->exists();
+        return in_array($this->status, ['In Progress', 'In Review', 'Completed', 'Done'])
+            && $this->assignments()
+                ->whereIn('acceptance_status', [TaskAssignment::STATUS_ACCEPTED, 'accepted'])
+                ->exists();
     }
 
     public function lock(?int $userId = null, ?string $reason = null): void

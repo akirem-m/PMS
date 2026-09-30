@@ -6,6 +6,7 @@ use App\Http\Requests\StoreTaskCommentRequest;
 use App\Http\Requests\StoreTaskRequest;
 use App\Http\Requests\UpdateTaskRequest;
 use App\Models\Attachment;
+use App\Models\Payment;
 use App\Models\Phase;
 use App\Models\Project;
 use App\Models\Role;
@@ -14,11 +15,11 @@ use App\Models\TaskAssignment;
 use App\Models\TaskComment;
 use App\Models\TaskProgressLog;
 use App\Models\Team;
-use App\Models\TeamMember;
 use App\Models\User;
 use App\Services\MentionService;
 use App\Services\RbacService;
 use App\Services\TaskBudgetAllocationService;
+use App\Services\UserResolver;
 use App\Support\Activity;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -171,9 +172,35 @@ class TaskController extends Controller
         $this->loadTaskTree($task);
 
         $canManage = ($project && $project->isManagedBy($user)) || $user->can('create_tasks');
-        $hasAcceptedAssignment = $task->assignments->contains(fn (TaskAssignment $assignment) => (int) $assignment->user_id === (int) $user->user_id && $assignment->status === 'accepted'
-        );
-        $canUpdateStatus = ! $task->is_locked && ($canManage || $task->assigned_to === $user->user_id || $hasAcceptedAssignment);
+
+        // Assignment decision for the signed-in user, read from the task_user
+        // pivot (task_assignments). Every acceptance UI decision — the response
+        // banner, the collaborator badge and the status control — keys off this
+        // one value so they can no longer disagree.
+        $myAssignment = $task->assignmentFor((int) $user->user_id);
+        $myAssignmentStatus = $myAssignment?->statusSlug();
+        $isAcceptedAssignee = $myAssignmentStatus === 'accepted';
+        $isRejectedAssignee = $myAssignmentStatus === 'rejected';
+
+        // A user who still owes an accept/reject response must respond before
+        // they may move the task status. Managers who can override locked
+        // terms are exempt.
+        $acceptanceBlocked = $myAssignmentStatus === 'pending'
+            && ! $user->can('modifyLocked', $task);
+
+        $canUpdateStatus = ! $acceptanceBlocked
+            && ($canManage
+                || $isAcceptedAssignee
+                || ((int) $task->assigned_to === (int) $user->user_id && ! $isRejectedAssignee));
+
+        // Assigned members drive the four delivery statuses; managers may also
+        // park work as Blocked.
+        $assigneeStatuses = ['To Do', 'In Progress', 'In Review', 'Completed'];
+        $statuses = $canManage ? [...$assigneeStatuses, 'Blocked'] : $assigneeStatuses;
+
+        $canLogExpense = (bool) ($project
+            && ($canManage || $isAcceptedAssignee || (int) $task->assigned_to === (int) $user->user_id)
+            && $user->can('create', [Payment::class, $project]));
 
         $assignableUsers = $project ? $project->getAssignableUsersWithRoles($user) : collect();
 
@@ -186,7 +213,7 @@ class TaskController extends Controller
             'id' => $task->task_id,
             'name' => $task->task_name,
             'status' => $task->status,
-            'statuses' => ['To Do', 'In Progress', 'In Review', 'Completed', 'Blocked'],
+            'statuses' => $statuses,
             'priority' => $task->priority,
             'progress' => $task->progress ?: (in_array($task->status, ['Done', 'Completed']) ? 100 : 0),
             'budget' => (float) ($task->budget ?: 0),
@@ -203,6 +230,7 @@ class TaskController extends Controller
                 'spent' => (float) ($task->phase->budget?->spent_amount ?? 0),
                 'task_allocated' => $task->phase->allocatedTaskAmount(),
                 'remaining' => $task->phase->remainingTaskBudget(),
+                'expense_remaining' => $task->phase->remainingExpenseBudget(),
             ] : null,
             'phases' => $phases,
             'project_id' => $project ? $project->project_id : null,
@@ -216,36 +244,41 @@ class TaskController extends Controller
             'is_overdue' => $task->isOverdue(),
             'blocker_reason' => $task->blocker_reason,
             'description' => $task->description,
-            'is_locked' => $task->isLocked(),
+            'is_locked' => (bool) $task->is_locked,
+            'agreement_locked' => $task->isLocked(),
             'locked_at' => optional($task->locked_at)?->format('d M Y H:i'),
             'lock_reason' => $task->lock_reason,
             'can_modify_locked' => $user->can('modifyLocked', $task),
-            'assignees' => $task->assignments->map(fn ($as) => [
-                'id' => $as->id,
-                'user_id' => $as->user_id,
-                'name' => optional($as->user)->full_name ?? 'Unassigned',
-                'role_label' => $as->role_label ?: 'Assignee',
-                'acceptance_status' => $as->acceptance_status,
-                'rejection_reason' => $as->rejection_reason,
-                'is_current_user' => (int) $as->user_id === (int) $user->user_id,
-                'responded_at' => optional($as->responded_at)?->diffForHumans(),
-            ]),
+            'assignees' => $task->assignments->map(fn (TaskAssignment $assignment) => [
+                'id' => $assignment->task_assignment_id,
+                'user_id' => $assignment->user_id,
+                'name' => optional($assignment->user)->full_name ?? 'Unassigned',
+                'role_label' => $assignment->role_label ?: 'Assignee',
+                'acceptance_status' => $assignment->acceptance_status,
+                'status_slug' => $assignment->statusSlug(),
+                'rejection_reason' => $assignment->rejection_reason,
+                'is_current_user' => (int) $assignment->user_id === (int) $user->user_id,
+                'can_respond' => (int) $assignment->user_id === (int) $user->user_id,
+                'responded_at' => optional($assignment->responded_at)?->diffForHumans(),
+            ])->values(),
             'can_accept' => $user->can('accept', $task),
             'can_reject' => $user->can('reject', $task),
             'total_cost' => $task->totalCost(),
             'can_update_status' => $canUpdateStatus,
             'can_manage' => $canManage,
-            'is_locked' => (bool) $task->is_locked,
-            'locked_at' => optional($task->locked_at)?->toIso8601String(),
+            'can_log_expense' => $canLogExpense,
             'can_lock' => (bool) ($project && $project->isManagedBy($user)),
             'assignable_users' => $assignableUsers,
-            'assignments' => $task->assignments->map(fn (TaskAssignment $assignment) => [
-                'id' => $assignment->task_assignment_id,
-                'user_id' => $assignment->user_id,
-                'name' => optional($assignment->user)->full_name,
-                'status' => $assignment->acceptance_status,
-                'can_respond' => (int) $assignment->user_id === (int) $user->user_id,
-            ])->values(),
+            'my_assignment' => $myAssignment ? [
+                'id' => $myAssignment->task_assignment_id,
+                'status' => $myAssignmentStatus,
+                'acceptance_status' => $myAssignment->acceptance_status,
+                'role_label' => $myAssignment->role_label,
+                'rejection_reason' => $myAssignment->rejection_reason,
+                'can_respond' => $myAssignmentStatus === 'pending',
+            ] : null,
+            'requires_acceptance' => $task->assignments->isNotEmpty(),
+            'acceptance_blocked' => $acceptanceBlocked,
             'subtasks' => $this->serializeTaskTree($task->subtasks),
             'attachments' => $task->attachments->map(fn ($a) => [
                 'id' => $a->attachment_id,
@@ -285,10 +318,11 @@ class TaskController extends Controller
                 $project = $phase->project;
             }
         } elseif ($request->filled('project_id')) {
-            $project = Project::with('phases')->find($request->input('project_id'));
-            if ($project && $project->phases->isNotEmpty()) {
-                $phase = $project->phases->first();
-            }
+            // A task submitted against a project but with no phase stays
+            // phase-less: it is the caller's decision which phase (if any)
+            // owns the work, and quietly filing it under the project's first
+            // phase would both hide it there and charge that phase's budget.
+            $project = Project::find($request->input('project_id'));
         }
 
         $canManage = $project ? ($project->isManagedBy($user) || $user->can('create_tasks')) : $user->can('create_tasks');
@@ -300,9 +334,17 @@ class TaskController extends Controller
 
         $data = $request->validated();
 
+        // Budget accountability follows the container that owns the task: a
+        // phase budget for phased work, the project budget for project-level
+        // work that names no phase.
         if ($phase) {
             app(TaskBudgetAllocationService::class)->assertAllocationAllowed(
                 $phase,
+                $data['budget'] ?? 0
+            );
+        } elseif ($project) {
+            app(TaskBudgetAllocationService::class)->assertProjectAllocationAllowed(
+                $project,
                 $data['budget'] ?? 0
             );
         }
@@ -327,23 +369,16 @@ class TaskController extends Controller
         ]);
 
         if ($resolvedAssigneeId) {
-            $this->syncAssignments($task, [$resolvedAssigneeId]);
+            // syncAssignments already creates the pivot row with a Pending
+            // Acceptance default; only the primary role label is stamped here.
+            $this->syncAssignments($task, [$resolvedAssigneeId], (int) $user->user_id);
+            $task->assignments()
+                ->where('user_id', $resolvedAssigneeId)
+                ->update(['role_label' => 'Primary Assignee']);
         }
 
         if ($project) {
             $project->recalculateProgress();
-        }
-
-        if ($resolvedAssigneeId) {
-            TaskAssignment::firstOrCreate(
-                ['task_id' => $task->task_id, 'user_id' => $resolvedAssigneeId],
-                [
-                    'role_label' => 'Primary Assignee',
-                    'acceptance_status' => 'Pending Acceptance',
-                    'assigned_by' => $user->user_id,
-                    'assigned_at' => now(),
-                ]
-            );
         }
 
         Activity::log('Created task', 'Task', $task->task_id, $task->task_name);
@@ -365,23 +400,49 @@ class TaskController extends Controller
 
     public function updateStatus(Request $request, Task $task)
     {
-        $task->load('phase.project.team', 'project');
+        $task->load('phase.project.team', 'project', 'assignments');
         $project = $task->project ?? optional($task->phase)->project;
         $user = Auth::user();
 
-        $this->abortIfLocked($task);
+        $assignment = $task->assignmentFor((int) $user->user_id);
+        $assignmentStatus = $assignment?->statusSlug();
+        $isManager = ($project && $project->isManagedBy($user)) || $user->isDirectorOrAdmin();
 
-        $primaryAssignment = $task->assignments->firstWhere('user_id', $user->user_id);
-        $isAssignee = (int) $task->assigned_to === (int) $user->user_id
-            && (! $primaryAssignment || $primaryAssignment->status === 'accepted');
+        // Agreement gate: an assignee who has not answered the assignment
+        // request cannot drive the task forward until they accept or reject.
+        // This replaces the old blanket "task is locked" abort — the lock now
+        // only protects the agreed terms (name/budget/dates/assignees), so an
+        // accepted member can still move To Do → In Progress → In Review →
+        // Completed on a locked task.
+        abort_if(
+            $assignmentStatus === 'pending' && ! $user->can('modifyLocked', $task),
+            422,
+            'Accept or reject your task assignment before changing its status.'
+        );
+
         $this->authorize('updateStatus', $task);
+
         $canUpdateTaskStatus = $project
             ? app(RbacService::class)->can($user, 'update_task_status', $project)
             : $user->hasPermission('update_task_status');
-        abort_unless($canUpdateTaskStatus && ($isAssignee || ($project && $project->isManagedBy($user)) || $user->isDirectorOrAdmin()), 403);
+        $isPrimaryAssignee = (int) $task->assigned_to === (int) $user->user_id;
+
+        abort_unless(
+            $canUpdateTaskStatus
+            && ($isManager
+                || $assignmentStatus === 'accepted'
+                || ($isPrimaryAssignee && $assignmentStatus !== 'rejected')),
+            403
+        );
+
+        // Assigned members move between the four delivery statuses; managers
+        // additionally keep the legacy statuses (Blocked, Pending, Done).
+        $allowedStatuses = $isManager
+            ? self::STATUSES
+            : ['To Do', 'In Progress', 'In Review', 'Completed'];
 
         $data = $request->validate([
-            'status' => ['required', 'in:'.implode(',', self::STATUSES)],
+            'status' => ['required', 'in:'.implode(',', $allowedStatuses)],
             'blocker_reason' => ['nullable', 'string', 'max:1000'],
             'remarks' => ['nullable', 'string', 'max:1000'],
         ]);
@@ -465,7 +526,7 @@ class TaskController extends Controller
         $previousAssignee = optional($task->assignee)->full_name ?? 'Unassigned';
         $primaryAssigneeId = $resolvedAssigneeIds->first();
         $task->update(['assigned_to' => $primaryAssigneeId]);
-        $this->syncAssignments($task, $resolvedAssigneeIds->all());
+        $this->syncAssignments($task, $resolvedAssigneeIds->all(), (int) $user->user_id);
 
         $assigneeName = optional($task->fresh()->assignee)->full_name ?? 'Unassigned';
         $remarks = "Reassigned from {$previousAssignee} to {$assigneeName}".($reason ? " (Reason: {$reason})" : '');
@@ -486,42 +547,67 @@ class TaskController extends Controller
             }
         }
 
+        $freshTask = $task->fresh(['assignments.user']);
+
         return response()->json([
             'assignee_id' => $task->assigned_to,
             'assignee' => $assigneeName,
-            'assignments' => $task->fresh('assignments.user')->assignments->map(fn (TaskAssignment $assignment) => [
-                'id' => $assignment->task_assignment_id,
-                'user_id' => $assignment->user_id,
-                'name' => optional($assignment->user)->full_name,
-                'status' => $assignment->status,
-            ]),
+            'assignees' => $this->serializeAssignees($freshTask, (int) $user->user_id),
         ]);
     }
 
     public function respondToAssignment(Request $request, TaskAssignment $assignment)
     {
-        abort_unless((int) $assignment->user_id === (int) Auth::id(), 403);
-        abort_if($assignment->task->is_locked, 422, 'This task is locked.');
+        $user = Auth::user();
+        abort_unless((int) $assignment->user_id === (int) $user->user_id, 403);
+
+        $task = $assignment->task()->firstOrFail();
+
+        abort_if(
+            $task->is_locked && ! $user->can('modifyLocked', $task),
+            422,
+            'This task is already locked.'
+        );
 
         $data = $request->validate([
             'status' => ['required', 'in:accepted,rejected'],
+            'rejection_reason' => ['nullable', 'string', 'max:1000'],
+            // `response_reason` is kept as a legacy alias for API clients that
+            // predate the unified acceptance vocabulary.
             'response_reason' => ['nullable', 'string', 'max:1000'],
         ]);
 
-        $assignment->update([
-            'status' => $data['status'],
-            'responded_at' => now(),
-            'response_reason' => $data['response_reason'] ?? null,
-        ]);
+        $accepted = $data['status'] === 'accepted';
+        $reason = $data['rejection_reason'] ?? $data['response_reason'] ?? null;
+
+        if (! $accepted) {
+            abort_if(blank($reason), 422, 'A reason is required when rejecting a task assignment.');
+        }
+
+        $this->applyAssignmentDecision($task, $user, $accepted, $reason);
 
         Activity::log(
-            ucfirst($data['status']).' task assignment',
+            ($accepted ? 'Accepted' : 'Rejected').' task assignment',
             'Task',
             $assignment->task_id,
-            $assignment->task->task_name
+            $task->task_name.($accepted ? '' : " — {$reason}")
         );
 
-        return response()->json(['status' => $assignment->status]);
+        $this->notifyAssigner(
+            $task,
+            $assignment,
+            $accepted
+                ? "{$user->full_name} accepted the assignment for \"{$task->task_name}\"."
+                : "{$user->full_name} rejected task \"{$task->task_name}\": {$reason}"
+        );
+
+        $freshTask = $task->fresh(['assignments.user']);
+
+        return response()->json([
+            'status' => $assignment->fresh()->statusSlug(),
+            'message' => $accepted ? 'Assignment accepted.' : 'Assignment rejected.',
+            'task_status' => $freshTask->status,
+        ] + $this->acceptancePayload($freshTask, $user));
     }
 
     public function lock(Task $task)
@@ -549,12 +635,13 @@ class TaskController extends Controller
 
     public function update(UpdateTaskRequest $request, Task $task)
     {
-        $task->load('phase.project', 'project');
+        $task->load('phase.project', 'project', 'assignments');
         $project = $task->project ?? optional($task->phase)->project;
         $user = Auth::user();
 
-        $this->abortIfLocked($task);
-
+        // No blanket lock abort here: the locked-terms guard below is the
+        // single decision point, and it honours the administrative override
+        // via modifyLocked. Blocking earlier made that override unreachable.
         $canManage = $project ? $project->isManagedBy($user) : false;
         $isAssignee = (int) $task->assigned_to === (int) $user->user_id;
 
@@ -603,7 +690,7 @@ class TaskController extends Controller
             $assigneeInput = $request->input('assigned_to') ?? $request->input('assignee_name');
             $data['assigned_to'] = $this->resolveAssigneeId($assigneeInput, $project);
             $this->assertAssigneeAllowed($project, $data['assigned_to']);
-            $this->syncAssignments($task, $data['assigned_to'] ? [$data['assigned_to']] : []);
+            $this->syncAssignments($task, $data['assigned_to'] ? [$data['assigned_to']] : [], (int) $user->user_id);
         }
 
         $targetPhase = array_key_exists('phase_id', $data)
@@ -616,7 +703,14 @@ class TaskController extends Controller
                 (int) $targetPhase->phase_id === (int) $task->phase_id ? $task->task_id : null
             );
         } elseif (array_key_exists('budget', $data) && (float) $data['budget'] > 0) {
-            abort(422, 'A task allocation requires a phase.');
+            $budgetProject = $task->project ?? optional($task->phase)->project;
+            abort_unless($budgetProject, 422, 'A task allocation requires a phase.');
+
+            app(TaskBudgetAllocationService::class)->assertProjectAllocationAllowed(
+                $budgetProject,
+                $data['budget'],
+                $task->task_id
+            );
         }
 
         if ($request->has('assignees')) {
@@ -627,7 +721,35 @@ class TaskController extends Controller
                 $this->assertAssigneeAllowed($project, $assigneeId);
             }
             $data['assigned_to'] = $assigneeIds[0] ?? null;
-            $this->syncAssignments($task, $assigneeIds);
+            $this->syncAssignments($task, $assigneeIds, (int) $user->user_id);
+        }
+
+        // A status change smuggled through the generic update endpoint must
+        // satisfy exactly the same acceptance gate and role whitelist as the
+        // dedicated /tasks/{task}/status endpoint.
+        if (isset($data['status']) && $data['status'] !== $task->status) {
+            $assignmentStatus = $task->assignmentFor((int) $user->user_id)?->statusSlug();
+
+            abort_if(
+                $assignmentStatus === 'pending' && ! $user->can('modifyLocked', $task),
+                422,
+                'Accept or reject your task assignment before changing its status.'
+            );
+
+            abort_unless(
+                $canManage
+                || $user->isDirectorOrAdmin()
+                || $assignmentStatus === 'accepted'
+                || (int) $task->assigned_to === (int) $user->user_id,
+                403,
+                "You don't have permission to change this task's status."
+            );
+
+            $allowedStatuses = ($canManage || $user->isDirectorOrAdmin())
+                ? self::STATUSES
+                : ['To Do', 'In Progress', 'In Review', 'Completed'];
+
+            abort_unless(in_array($data['status'], $allowedStatuses, true), 422, 'That status transition is not available to you.');
         }
 
         if (isset($data['status'])) {
@@ -759,41 +881,19 @@ class TaskController extends Controller
         $user = Auth::user();
         $this->authorize('accept', $task);
 
-        $assignment = TaskAssignment::where('task_id', $task->task_id)
-            ->where('user_id', $user->user_id)
-            ->first();
-
-        if (! $assignment) {
-            $assignment = TaskAssignment::create([
-                'task_id' => $task->task_id,
-                'user_id' => $user->user_id,
-                'role_label' => 'Assignee',
-                'acceptance_status' => 'Pending Acceptance',
-                'assigned_by' => $task->project?->project_manager_id ?? $user->user_id,
-                'assigned_at' => now(),
-            ]);
-        }
-
-        $assignment->update([
-            'acceptance_status' => 'Accepted',
-            'rejection_reason' => null,
-            'responded_at' => now(),
-        ]);
-
-        if (in_array($task->status, ['Pending', 'To Do', 'Pending Acceptance', 'Assigned'])) {
-            $task->update(['status' => 'In Progress']);
-        }
-
-        // Lock agreed terms upon acceptance
-        $task->lock($user->user_id, "Accepted by {$user->full_name}");
+        $assignment = $this->applyAssignmentDecision($task, $user, true, null);
 
         Activity::log('Accepted task assignment', 'Task', $task->task_id, "{$user->full_name} accepted assignment for task '{$task->task_name}'. Agreed terms locked.");
 
+        $this->notifyAssigner($task, $assignment, "{$user->full_name} accepted the assignment for \"{$task->task_name}\".");
+
         if ($request->wantsJson()) {
+            $freshTask = $task->fresh(['assignments.user']);
+
             return response()->json([
                 'message' => 'Task accepted successfully. Agreed details are now locked.',
-                'task' => $task->fresh(['assignments.user']),
-            ]);
+                'task_status' => $freshTask->status,
+            ] + $this->acceptancePayload($freshTask, $user));
         }
 
         return back()->with('status', 'Task accepted successfully.');
@@ -808,46 +908,33 @@ class TaskController extends Controller
             'rejection_reason' => ['required', 'string', 'max:1000'],
         ]);
 
-        $assignment = TaskAssignment::where('task_id', $task->task_id)
-            ->where('user_id', $user->user_id)
-            ->first();
+        abort_if(
+            $task->isLocked()
+                && $task->assignmentFor((int) $user->user_id)?->isAccepted()
+                && ! $user->can('modifyLocked', $task),
+            422,
+            'This assignment is already accepted and the agreed terms are locked.'
+        );
 
-        if (! $assignment) {
-            $assignment = TaskAssignment::create([
-                'task_id' => $task->task_id,
-                'user_id' => $user->user_id,
-                'role_label' => 'Assignee',
-                'acceptance_status' => 'Pending Acceptance',
-                'assigned_by' => $task->project?->project_manager_id ?? $user->user_id,
-                'assigned_at' => now(),
-            ]);
-        }
-
-        $assignment->update([
-            'acceptance_status' => 'Rejected',
-            'rejection_reason' => $data['rejection_reason'],
-            'responded_at' => now(),
-        ]);
-
-        $hasAcceptedOrPending = TaskAssignment::where('task_id', $task->task_id)
-            ->where('acceptance_status', '!=', 'Rejected')
-            ->exists();
-
-        if (! $hasAcceptedOrPending) {
-            $task->update(['status' => 'Blocked', 'blocker_reason' => "Task rejected by {$user->full_name}: {$data['rejection_reason']}"]);
-        }
+        $assignment = $this->applyAssignmentDecision($task, $user, false, $data['rejection_reason']);
 
         Activity::log('Rejected task assignment', 'Task', $task->task_id, "{$user->full_name} rejected assignment for task '{$task->task_name}'. Reason: {$data['rejection_reason']}");
 
-        if ($task->project?->project_manager_id) {
-            Activity::notify($task->project->project_manager_id, "{$user->full_name} rejected task '{$task->task_name}': {$data['rejection_reason']}", 'task');
-        }
+        // The person who assigned the work is always notified; the project
+        // manager of record is the fallback when the pivot has no assigner.
+        $this->notifyAssigner(
+            $task,
+            $assignment,
+            "{$user->full_name} rejected task \"{$task->task_name}\": {$data['rejection_reason']}"
+        );
 
         if ($request->wantsJson()) {
+            $freshTask = $task->fresh(['assignments.user']);
+
             return response()->json([
                 'message' => 'Task assignment rejected.',
-                'task' => $task->fresh(['assignments.user']),
-            ]);
+                'task_status' => $freshTask->status,
+            ] + $this->acceptancePayload($freshTask, $user));
         }
 
         return back()->with('status', 'Task assignment rejected.');
@@ -874,7 +961,7 @@ class TaskController extends Controller
                 ['task_id' => $task->task_id, 'user_id' => $targetUserId],
                 [
                     'role_label' => $u['role_label'] ?? 'Contributor',
-                    'acceptance_status' => 'Pending Acceptance',
+                    'acceptance_status' => TaskAssignment::STATUS_PENDING,
                     'assigned_by' => $user->user_id,
                     'assigned_at' => now(),
                 ]
@@ -890,9 +977,11 @@ class TaskController extends Controller
         Activity::log('Assigned users to task', 'Task', $task->task_id, "Users assigned to '{$task->task_name}'");
 
         if ($request->wantsJson()) {
+            $freshTask = $task->fresh(['assignments.user']);
+
             return response()->json([
                 'message' => 'Users assigned successfully.',
-                'assignees' => $task->fresh(['assignments.user'])->assignments,
+                'assignees' => $this->serializeAssignees($freshTask, (int) $user->user_id),
             ]);
         }
 
@@ -902,8 +991,11 @@ class TaskController extends Controller
     public function removeAssignee(Request $request, Task $task, User $user)
     {
         $currentUser = Auth::user();
-        $this->authorize('assign', $task);
 
+        // The agreement lock protects the assignee list. Checked before the
+        // policy so a caller without modifyLocked authority gets an
+        // explanation rather than a bare 403; managers holding the override
+        // fall through to the normal authorization below.
         if ($task->isLocked() && ! $currentUser->can('modifyLocked', $task)) {
             $msg = 'Task is locked. Assignees cannot be removed without administrative authorization.';
             if ($request->wantsJson()) {
@@ -912,6 +1004,8 @@ class TaskController extends Controller
 
             return back()->withErrors(['locked' => $msg]);
         }
+
+        $this->authorize('assign', $task);
 
         $task->assignments()->where('user_id', $user->user_id)->delete();
 
@@ -923,9 +1017,11 @@ class TaskController extends Controller
         Activity::log('Removed assignee from task', 'Task', $task->task_id, "User {$user->full_name} removed from task '{$task->task_name}'");
 
         if ($request->wantsJson()) {
+            $freshTask = $task->fresh(['assignments.user']);
+
             return response()->json([
                 'message' => 'Assignee removed successfully.',
-                'assignees' => $task->fresh(['assignments.user'])->assignments,
+                'assignees' => $this->serializeAssignees($freshTask, (int) $currentUser->user_id),
             ]);
         }
 
@@ -934,7 +1030,9 @@ class TaskController extends Controller
 
     public function storeSubtask(Request $request, Task $task)
     {
+        $this->authorize('manageSubtasks', $task);
         $this->abortIfLocked($task);
+
         $data = $request->validate([
             'task_name' => ['required', 'string', 'max:150'],
             'priority' => ['nullable', 'in:Low,Medium,High,Urgent'],
@@ -943,6 +1041,15 @@ class TaskController extends Controller
             'start_date' => ['nullable', 'date'],
             'end_date' => ['nullable', 'date'],
         ]);
+
+        // Subtasks share their parent's phase and draw from the same phase
+        // budget, so their allocation is validated against it too.
+        if ($task->phase && (float) ($data['budget'] ?? 0) > 0) {
+            app(TaskBudgetAllocationService::class)->assertAllocationAllowed(
+                $task->phase,
+                (float) $data['budget']
+            );
+        }
 
         $subtask = Task::create([
             'project_id' => $task->project_id,
@@ -963,7 +1070,7 @@ class TaskController extends Controller
                 ['task_id' => $subtask->task_id, 'user_id' => $subtask->assigned_to],
                 [
                     'role_label' => 'Subtask Assignee',
-                    'acceptance_status' => 'Pending Acceptance',
+                    'acceptance_status' => TaskAssignment::STATUS_PENDING,
                     'assigned_by' => Auth::id(),
                     'assigned_at' => now(),
                 ]
@@ -981,7 +1088,9 @@ class TaskController extends Controller
 
     public function toggleSubtask(Task $subtask)
     {
+        $this->authorizeSubtask($subtask);
         $this->abortIfLocked($subtask);
+
         $newStatus = in_array($subtask->status, ['Done', 'Completed']) ? 'To Do' : 'Completed';
         $subtask->update(['status' => $newStatus, 'progress' => $newStatus === 'Completed' ? 100 : 0]);
 
@@ -993,75 +1102,43 @@ class TaskController extends Controller
         ]);
     }
 
-    private function resolveAssigneeId($input, ?Project $project = null): ?int
+    public function destroySubtask(Request $request, Task $subtask)
     {
-        if ($input === null || $input === '') {
-            return null;
-        }
+        $this->authorizeSubtask($subtask);
+        $this->abortIfLocked($subtask);
 
-        if (is_numeric($input)) {
-            $user = User::find((int) $input);
-            if ($user) {
-                return $user->user_id;
-            }
-        }
+        $parentId = $subtask->parent_task_id;
+        $subtaskName = $subtask->task_name;
 
-        $trimmed = trim((string) $input);
-        if ($trimmed === '' || $trimmed === '— Unassigned —' || $trimmed === 'Unassigned') {
-            return null;
-        }
+        Activity::log('Deleted subtask', 'Task', $subtask->task_id, $subtaskName);
 
-        $user = User::where('email', $trimmed)
-            ->orWhere('full_name', $trimmed)
-            ->orWhereRaw('LOWER(full_name) = ?', [strtolower($trimmed)])
-            ->first();
+        $subtask->comments()->delete();
+        $subtask->progressLogs()->delete();
+        $subtask->dependencies()->detach();
+        $subtask->dependents()->detach();
+        $subtask->assignments()->delete();
 
-        if ($user) {
-            return $user->user_id;
-        }
+        // Grandchildren are preserved at the parent level rather than cascaded.
+        $subtask->subtasks()->update(['parent_task_id' => $parentId]);
+        $subtask->delete();
 
-        $user = User::where('full_name', 'LIKE', "%{$trimmed}%")->first();
-        if ($user) {
-            return $user->user_id;
-        }
-
-        $slug = strtolower(preg_replace('/[^a-zA-Z0-9]+/', '.', $trimmed));
-        $slug = trim($slug, '.');
-        if (empty($slug)) {
-            $slug = 'member.'.rand(100, 999);
-        }
-
-        $email = $slug.'@example.com';
-        $counter = 1;
-        while (User::where('email', $email)->exists()) {
-            $email = $slug.$counter.'@example.com';
-            $counter++;
-        }
-
-        $newUser = User::create([
-            'full_name' => $trimmed,
-            'email' => $email,
-            'password_hash' => bcrypt('ChangeMe123!'),
-            'status' => 'Active',
-        ]);
-
-        $role = Role::where('role_name', 'Team Member')->first();
-        if ($role) {
-            $newUser->roles()->attach($role->role_id);
-        }
-
-        if ($project && $project->team_id) {
-            TeamMember::firstOrCreate([
-                'team_id' => $project->team_id,
-                'user_id' => $newUser->user_id,
-            ], [
-                'joined_date' => now()->toDateString(),
+        if ($request->wantsJson()) {
+            return response()->json([
+                'message' => 'Subtask deleted.',
+                'id' => $subtask->task_id,
             ]);
         }
 
-        Activity::log('Created team member via task assignment', 'User', $newUser->user_id, "{$newUser->full_name} ({$email})");
+        return back()->with('status', "\"{$subtaskName}\" was deleted.");
+    }
 
-        return $newUser->user_id;
+    /**
+     * Assignee resolution (including placeholder creation for a typed name)
+     * lives in UserResolver so task, team and project forms cannot drift.
+     */
+    private function resolveAssigneeId($input, ?Project $project = null): ?int
+    {
+        return app(UserResolver::class)->resolve($input, $project?->team_id);
     }
 
     /**
@@ -1118,17 +1195,152 @@ class TaskController extends Controller
         abort_if($task->is_locked, 422, 'This task is locked and cannot be edited.');
     }
 
-    private function syncAssignments(Task $task, array $userIds): void
+    private function syncAssignments(Task $task, array $userIds, ?int $assignedBy = null): void
     {
         $userIds = collect($userIds)->map(fn ($id) => (int) $id)->filter()->unique();
+        $assignedBy ??= Auth::id();
+
         $task->assignments()->whereNotIn('user_id', $userIds->all())->delete();
 
         foreach ($userIds as $userId) {
             $task->assignments()->firstOrCreate(
                 ['user_id' => $userId],
-                ['status' => 'pending', 'assigned_at' => now()]
+                [
+                    'role_label' => 'Contributor',
+                    'acceptance_status' => TaskAssignment::STATUS_PENDING,
+                    'assigned_by' => $assignedBy,
+                    'assigned_at' => now(),
+                ]
             );
         }
+    }
+
+    /**
+     * Record an accept/reject decision on the task_user pivot and apply its
+     * side effects: status transition, agreement lock, and the blocker flag
+     * when a rejection leaves nobody engaged on the task.
+     */
+    private function applyAssignmentDecision(Task $task, User $user, bool $accepted, ?string $reason): TaskAssignment
+    {
+        $assignment = $task->assignmentFor((int) $user->user_id);
+
+        if (! $assignment) {
+            $assignment = TaskAssignment::create([
+                'task_id' => $task->task_id,
+                'user_id' => $user->user_id,
+                'role_label' => 'Assignee',
+                'acceptance_status' => TaskAssignment::STATUS_PENDING,
+                'assigned_by' => $task->project?->project_manager_id ?? $user->user_id,
+                'assigned_at' => now(),
+            ]);
+        }
+
+        $assignment->update([
+            'acceptance_status' => $accepted ? TaskAssignment::STATUS_ACCEPTED : TaskAssignment::STATUS_REJECTED,
+            'rejection_reason' => $accepted ? null : $reason,
+            'responded_at' => now(),
+        ]);
+
+        if ($accepted) {
+            if (in_array($task->status, ['Pending', 'To Do', 'Pending Acceptance', 'Assigned'])) {
+                $task->update(['status' => 'In Progress']);
+            }
+
+            // Agreed terms are locked once the assignee commits.
+            $task->lock((int) $user->user_id, "Accepted by {$user->full_name}");
+
+            return $assignment;
+        }
+
+        // A rejection only blocks the task when nobody else is still engaged.
+        $stillEngaged = TaskAssignment::where('task_id', $task->task_id)
+            ->whereIn('acceptance_status', [
+                TaskAssignment::STATUS_ACCEPTED, TaskAssignment::STATUS_PENDING, 'accepted', 'pending',
+            ])
+            ->exists();
+
+        if (! $stillEngaged) {
+            $task->update([
+                'status' => 'Blocked',
+                'blocker_reason' => "Task rejected by {$user->full_name}".($reason ? ": {$reason}" : ''),
+            ]);
+        }
+
+        return $assignment;
+    }
+
+    /** Notify whoever assigned the work, falling back to the project manager. */
+    private function notifyAssigner(Task $task, ?TaskAssignment $assignment, string $message): void
+    {
+        $assignerId = $assignment?->assigned_by
+            ? (int) $assignment->assigned_by
+            : ($task->project?->project_manager_id ? (int) $task->project->project_manager_id : null);
+
+        if ($assignerId) {
+            Activity::notify($assignerId, $message, 'task');
+        }
+    }
+
+    /**
+     * Canonical assignee payload shared by every endpoint that mutates the
+     * assignment pivot, so the drawer can re-render badges without a reload.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function serializeAssignees(Task $task, int $viewerId): array
+    {
+        return $task->assignments->map(fn (TaskAssignment $assignment) => [
+            'id' => $assignment->task_assignment_id,
+            'user_id' => $assignment->user_id,
+            'name' => optional($assignment->user)->full_name ?? 'Unassigned',
+            'role_label' => $assignment->role_label ?: 'Assignee',
+            'acceptance_status' => $assignment->acceptance_status,
+            'status_slug' => $assignment->statusSlug(),
+            'rejection_reason' => $assignment->rejection_reason,
+            'is_current_user' => (int) $assignment->user_id === $viewerId,
+            'can_respond' => (int) $assignment->user_id === $viewerId,
+            'responded_at' => optional($assignment->responded_at)?->diffForHumans(),
+        ])->values()->all();
+    }
+
+    /**
+     * Payload returned by every accept/reject/respond endpoint so the drawer
+     * hides the response banner and flips the collaborator badge immediately.
+     *
+     * @return array<string, mixed>
+     */
+    private function acceptancePayload(Task $task, User $viewer): array
+    {
+        $assignment = $task->assignmentFor((int) $viewer->user_id);
+        $status = $assignment?->statusSlug();
+
+        return [
+            'my_assignment' => $assignment ? [
+                'id' => $assignment->task_assignment_id,
+                'status' => $status,
+                'acceptance_status' => $assignment->acceptance_status,
+                'role_label' => $assignment->role_label,
+                'rejection_reason' => $assignment->rejection_reason,
+                'can_respond' => $status === 'pending',
+            ] : null,
+            'requires_acceptance' => $task->assignments->isNotEmpty(),
+            'assignees' => $this->serializeAssignees($task, (int) $viewer->user_id),
+        ];
+    }
+
+    /** Subtask mutations follow the parent task's participation rules. */
+    private function authorizeSubtask(Task $subtask): void
+    {
+        $governing = $subtask->parent_task_id
+            ? ($subtask->parent()->first() ?? $subtask)
+            : $subtask;
+
+        $user = Auth::user();
+
+        abort_unless(
+            $user->can('manageSubtasks', $subtask) || $user->can('manageSubtasks', $governing),
+            403
+        );
     }
 
     private function serializeTaskTree($tasks): array

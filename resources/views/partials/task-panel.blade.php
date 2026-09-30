@@ -57,7 +57,7 @@
       </template>
 
       <!-- Lock Banner if Locked -->
-      <template x-if="task.is_locked">
+      <template x-if="task.is_locked || task.agreement_locked">
         <div style="background:#f0fdf4; border:1px solid #86efac; border-radius:8px; padding:10px 14px; margin-bottom:14px; display:flex; justify-content:space-between; align-items:center;">
           <div style="font-size:12px; color:#166534; display:flex; align-items:center; gap:6px;">
             <span>🔒 <strong>TASK AGREEMENT LOCKED</strong></span>
@@ -69,8 +69,10 @@
         </div>
       </template>
 
-      <!-- Assignment Accept / Reject Action Banner -->
-      <template x-if="task.can_accept && task.assignees && task.assignees.some(a => a.is_current_user && a.acceptance_status === 'Pending Acceptance')">
+      <!-- Assignment Accept / Reject Action Banner.
+           Shown ONLY while the signed-in user's own task_user pivot row is
+           still 'pending' — accepting or rejecting hides it immediately. -->
+      <template x-if="task.my_assignment && task.my_assignment.status === 'pending'">
         <div style="background:#eff6ff; border:1px solid #93c5fd; border-radius:8px; padding:12px 14px; margin-bottom:16px;">
           <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
             <div>
@@ -94,15 +96,18 @@
               @change="!editing && updateStatus()"
               style="border:1px solid var(--line); border-radius:6px; padding:4px 8px; font-size:12.5px; font-family:inherit; font-weight:700; color:inherit; background:var(--surface);"
             >
-              <option value="To Do">To Do</option>
-              <option value="In Progress">In Progress</option>
-              <option value="In Review">In Review</option>
-              <option value="Completed">Completed</option>
-              <option value="Blocked">Blocked</option>
+              <!-- Options come from the server: assigned members get the four
+                   delivery statuses, managers additionally get Blocked. -->
+              <template x-for="statusOption in (task.statuses || ['To Do', 'In Progress', 'In Review', 'Completed'])" :key="statusOption">
+                <option :value="statusOption" x-text="statusOption"></option>
+              </template>
             </select>
           </template>
           <template x-if="!task.can_update_status && !editing">
             <span class="badge" :class="task.status === 'Completed' || task.status === 'Done' ? 'b-active' : (task.status === 'In Progress' ? 'b-planning' : (task.status === 'Blocked' ? 'b-blocked' : 'b-risk'))" x-text="task.status"></span>
+          </template>
+          <template x-if="task.acceptance_blocked">
+            <div style="font-size:11px; color:var(--danger); margin-top:4px;">Accept or reject your assignment before changing the status.</div>
           </template>
         </span>
       </div>
@@ -195,15 +200,15 @@
       <div class="field-row">
         <span class="k">Collaborators</span>
         <span class="v" style="display:flex; flex-direction:column; align-items:stretch; gap:6px;">
-          <template x-for="a in (task.assignments || [])" :key="a.id">
+          <template x-for="a in (task.assignees || [])" :key="a.id">
             <span style="display:flex; justify-content:space-between; gap:8px; align-items:center;">
               <span x-text="a.name"></span>
               <span style="display:flex; gap:5px; align-items:center;">
-                <span class="badge" :class="a.status === 'accepted' ? 'b-active' : (a.status === 'rejected' ? 'b-blocked' : 'b-risk')" x-text="a.status"></span>
-                <template x-if="a.can_respond && a.status === 'pending' && !task.is_locked">
+                <span class="badge" :class="a.status_slug === 'accepted' ? 'b-active' : (a.status_slug === 'rejected' ? 'b-blocked' : 'b-risk')" x-text="a.acceptance_status"></span>
+                <template x-if="a.can_respond && a.status_slug === 'pending' && !task.is_locked">
                   <span style="display:flex; gap:4px;">
                     <button type="button" class="btn btn-ghost" style="padding:2px 6px; font-size:10px;" @click="respondAssignment(a, 'accepted')">Accept</button>
-                    <button type="button" class="btn btn-ghost" style="padding:2px 6px; font-size:10px;" @click="respondAssignment(a, 'rejected')">Reject</button>
+                    <button type="button" class="btn btn-ghost" style="padding:2px 6px; font-size:10px;" @click="showRejectModal = true">Reject</button>
                   </span>
                 </template>
               </span>
@@ -288,8 +293,8 @@
           <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
             <select x-model="newAssigneeUserId" style="flex:1; min-width:160px; border:1px solid var(--line); border-radius:6px; padding:6px 10px; font-size:12.5px; font-family:inherit; background:var(--surface);">
               <option value="">— Add Assignee —</option>
-              <template x-for="u in task.assignable_users" :key="u.user_id">
-                <option :value="u.user_id" x-text="u.full_name + (u.role_title ? ' (' + u.role_title + ')' : '')"></option>
+              <template x-for="u in task.assignable_users" :key="u.id">
+                <option :value="u.id" x-text="u.name"></option>
               </template>
             </select>
             <input type="text" x-model="newAssigneeRole" placeholder="Role (e.g. Tester, Frontend)" style="width:140px; border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:12px; font-family:inherit; background:var(--surface);">
@@ -304,7 +309,12 @@
           <div style="font-size:11px; text-transform:uppercase; font-weight:700; color:var(--ink-muted);">Task Expenditure / Cost</div>
           <div style="font-size:14px; font-weight:800; color:var(--ink); margin-top:2px;" x-text="'ETB ' + Number(task.total_cost || 0).toLocaleString()"></div>
         </div>
-        <a href="{{ route('payments.index') }}" class="btn btn-ghost" style="padding:4px 10px; font-size:11px;">View Payments →</a>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <template x-if="task.can_log_expense">
+            <button type="button" class="btn btn-primary" style="padding:4px 10px; font-size:11px;" @click="showExpenseModal = true">+ Log Expense</button>
+          </template>
+          <a href="{{ route('payments.index') }}" class="btn btn-ghost" style="padding:4px 10px; font-size:11px;">View Payments →</a>
+        </div>
       </div>
 
       <!-- Subtasks Section -->
@@ -436,6 +446,53 @@
       </div>
     </div>
   </div>
+
+  <!-- Log Task Expenditure: assigned workers submit against the task/phase
+       budget; the request enters the approval queue as Pending. -->
+  <template x-if="task.can_log_expense">
+    <div x-show="showExpenseModal" x-cloak style="position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:99999; display:flex; align-items:center; justify-content:center; padding:16px;">
+      <div class="card card-pad" style="max-width:480px; width:100%; background:var(--surface);" @click.away="showExpenseModal = false">
+        <h3 style="margin-top:0; font-size:15px;">Log Task Expenditure</h3>
+        <p style="font-size:12.5px; color:var(--ink-soft); margin-bottom:12px;">
+          Submitted expenses go to the Project Manager / Team Lead for approval, then to the Head of Office / Finance to confirm disbursement.
+        </p>
+        <template x-if="task.phase_budget">
+          <div style="font-size:12px; background:var(--bg-subtle); border:1px solid var(--line); border-radius:6px; padding:8px 10px; margin-bottom:12px;">
+            Phase funds available for new expenses:
+            <strong style="color:var(--success);" x-text="'ETB ' + Number(task.phase_budget.expense_remaining || 0).toLocaleString(undefined, {minimumFractionDigits: 2})"></strong>
+          </div>
+        </template>
+        <form method="POST" action="{{ route('payments.store') }}">
+          @csrf
+          <input type="hidden" name="task_id" :value="task.id">
+          <input type="hidden" name="project_id" :value="task.project_id">
+          <input type="hidden" name="phase_id" :value="task.phase_id">
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+            <div class="form-field">
+              <label>Amount (ETB) <span style="color:var(--danger);">*</span></label>
+              <input type="number" step="0.01" min="0.01" name="amount" required placeholder="e.g. 1500" style="width:100%; border:1px solid var(--line); border-radius:6px; padding:6px 10px; font-size:13px; font-family:inherit;">
+            </div>
+            <div class="form-field">
+              <label>Expense Date <span style="color:var(--danger);">*</span></label>
+              <input type="date" name="payment_date" required value="{{ now()->toDateString() }}" style="width:100%; border:1px solid var(--line); border-radius:6px; padding:6px 10px; font-size:13px; font-family:inherit;">
+            </div>
+          </div>
+          <div class="form-field">
+            <label>Paid To / Payee <span style="color:var(--danger);">*</span></label>
+            <input type="text" name="recipient" required placeholder="e.g. Transport vendor, materials supplier" style="width:100%; border:1px solid var(--line); border-radius:6px; padding:6px 10px; font-size:13px; font-family:inherit;">
+          </div>
+          <div class="form-field">
+            <label>Justification / Remarks</label>
+            <textarea name="description" rows="2" placeholder="What this expense was for..." style="width:100%; border:1px solid var(--line); border-radius:6px; padding:6px 10px; font-size:13px; font-family:inherit;"></textarea>
+          </div>
+          <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:14px;">
+            <button type="button" class="btn btn-ghost" @click="showExpenseModal = false">Cancel</button>
+            <button type="submit" class="btn btn-primary">Submit for Approval</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </template>
 </div>
 
 <script>
@@ -452,9 +509,8 @@
       addingSubtask: false,
       uploadingFile: false,
       savedMessage: '',
-      fileSelected: null,
-      uploading: false,
       showRejectModal: false,
+      showExpenseModal: false,
       rejectionReason: '',
       newAssigneeUserId: '',
       newAssigneeRole: '',
@@ -470,12 +526,18 @@
           return;
         }
         this.task = await res.json();
-        this.selectedCollaboratorIds = (this.task.assignments || []).map(a => String(a.user_id));
+        this.selectedCollaboratorIds = (this.task.assignees || []).map(a => String(a.user_id));
         this.open = true;
         this.editing = startInEditMode;
         this.dirty = false;
-        this.fileSelected = null;
-        document.getElementById('file-input').value = ''; // reset file input
+        this.showRejectModal = false;
+        this.showExpenseModal = false;
+        this.rejectionReason = '';
+
+        const fileInput = document.getElementById('file-input');
+        if (fileInput) {
+          fileInput.value = ''; // reset file input
+        }
       },
 
       close() {
@@ -608,6 +670,7 @@
             <input type="checkbox" ${node.is_completed ? 'checked' : ''} ${this.task.is_locked ? 'disabled' : ''} onchange="window.toggleTaskSubtask(${node.id})" style="accent-color:var(--accent); cursor:pointer;">
             <span style="flex:1; font-size:13px; ${node.is_completed ? 'text-decoration:line-through; color:var(--ink-muted);' : 'color:var(--ink);'}">${this.escapeTaskText(node.name)}</span>
             <span class="badge ${node.is_completed ? 'b-active' : 'b-risk'}" style="font-size:10px;">${node.is_completed ? 'Done' : 'Pending'}</span>
+            <button type="button" ${this.task.is_locked ? 'disabled' : ''} onclick="window.deleteTaskSubtask(${node.id})" title="Delete subtask" style="border:none; background:transparent; color:var(--danger); cursor:pointer; font-size:12px; line-height:1;">✕</button>
           </div>${this.renderTaskTree(node.children, depth + 1)}
         `).join('');
       },
@@ -623,7 +686,8 @@
           return;
         }
         const data = await res.json();
-        this.task.assignments = data.assignments || [];
+        this.task.assignees = data.assignees || [];
+        this.selectedCollaboratorIds = (this.task.assignees || []).map(a => String(a.user_id));
         this.task.assignee_id = data.assignee_id || null;
         this.task.assignee = data.assignee || null;
         this.task.assignee_name = data.assignee || null;
@@ -631,15 +695,53 @@
         this.dirty = true;
       },
 
+      /**
+       * Apply an accept/reject payload straight onto the panel state so the
+       * response banner disappears and the collaborator badge flips to
+       * Accepted/Rejected without waiting for a reload.
+       */
+      applyAssignmentPayload(data) {
+        if (Array.isArray(data.assignees)) {
+          this.task.assignees = data.assignees;
+        }
+        if ('my_assignment' in data) {
+          this.task.my_assignment = data.my_assignment;
+        }
+        if (typeof data.requires_acceptance === 'boolean') {
+          this.task.requires_acceptance = data.requires_acceptance;
+        }
+        if (typeof data.task_status === 'string') {
+          this.task.status = data.task_status;
+        }
+
+        const pending = !!(this.task.my_assignment && this.task.my_assignment.status === 'pending');
+        this.task.acceptance_blocked = pending;
+        this.task.can_accept = pending;
+        this.task.can_reject = pending;
+      },
+
       async respondAssignment(assignment, status) {
-        const res = await fetch(`/tasks/assignments/${assignment.id}/respond`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-CSRF-TOKEN': this.csrf() },
-          body: JSON.stringify({ status })
-        });
-        if (res.ok) {
-          assignment.status = status;
+        try {
+          const res = await fetch(`/tasks/assignments/${assignment.id}/respond`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-CSRF-TOKEN': this.csrf() },
+            body: JSON.stringify({ status })
+          });
+
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            alertDialog({ text: err.message || 'Failed to respond to the assignment.' });
+            return;
+          }
+
+          const data = await res.json().catch(() => ({}));
+          assignment.status = data.status || status;
+          this.applyAssignmentPayload(data);
           this.flash(`Assignment ${status}`);
+          this.dirty = true;
+          await this.show(this.task.id);
+        } catch (e) {
+          console.error('Assignment response error:', e);
         }
       },
 
@@ -672,30 +774,36 @@
           this.task.blocker_reason = reason || 'Blocker reported';
         }
 
-        const res = await fetch(`/tasks/${this.task.id}/status`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-CSRF-TOKEN': this.csrf()
-          },
-          body: JSON.stringify({
-            status: this.task.status,
-            blocker_reason: this.task.blocker_reason
-          })
-        });
-        if (!res.ok) {
-          console.error(
-            'Failed to update status:',
-            res.status,
-            await res.text()
-          );
-          return;
+        try {
+          const res = await fetch(`/tasks/${this.task.id}/status`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+              'X-CSRF-TOKEN': this.csrf()
+            },
+            body: JSON.stringify({
+              status: this.task.status,
+              blocker_reason: this.task.blocker_reason
+            })
+          });
+
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            alertDialog({ text: err.message || 'This status change was not allowed.' });
+            // Re-sync with the server so the select reflects the real status.
+            await this.show(this.task.id);
+            return;
+          }
+
+          const data = await res.json();
+          this.task.status = data.status;
+          this.task.blocker_reason = data.blocker_reason;
+          this.flash('Status updated');
+          this.dirty = true;
+        } catch (e) {
+          console.error('Status update error:', e);
         }
-        const data = await res.json();
-        this.task.status = data.status;
-        this.task.blocker_reason = data.blocker_reason;
-        this.flash('Status updated');
-        this.dirty = true;
       },
 
       async resolveBlocker() {
@@ -703,34 +811,6 @@
         this.task.blocker_reason = null;
         await this.updateStatus();
         this.flash('Blocker resolved');
-      },
-
-      async reassign() {
-        const res = await fetch(`/tasks/${this.task.id}/assign`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-            'X-CSRF-TOKEN': this.csrf()
-          },
-          body: JSON.stringify({
-            assigned_to: this.task.assignee_name || this.task.assignee_id
-          })
-        });
-        if (!res.ok) {
-          console.error(
-            'Failed to reassign task:',
-            res.status,
-            await res.text()
-          );
-          return;
-        }
-        const data = await res.json();
-        this.task.assignee_id = data.assignee_id;
-        this.task.assignee = data.assignee;
-        this.task.assignee_name = data.assignee;
-        this.flash('Reassigned');
-        this.dirty = true;
       },
 
       async savePriority() {
@@ -811,6 +891,38 @@
           console.error(e);
         } finally {
           this.addingSubtask = false;
+        }
+      },
+
+      async deleteSubtask(subtaskId) {
+        const confirmed = await confirmDialog({
+          title: 'Delete this subtask?',
+          text: 'This action is permanent and cannot be undone.',
+          confirmText: 'Yes, delete it',
+        });
+
+        if (!confirmed) return;
+
+        try {
+          const res = await fetch(`/tasks/subtasks/${subtaskId}`, {
+            method: 'DELETE',
+            headers: {
+              'Accept': 'application/json',
+              'X-CSRF-TOKEN': this.csrf()
+            }
+          });
+
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            alertDialog({ text: err.message || 'Failed to delete subtask.' });
+            return;
+          }
+
+          this.flash('Subtask deleted');
+          this.dirty = true;
+          await this.show(this.task.id);
+        } catch (e) {
+          console.error('Delete subtask error:', e);
         }
       },
 
@@ -901,14 +1013,19 @@
               'X-CSRF-TOKEN': this.csrf()
             }
           });
-          if (res.ok) {
-            this.flash('Task accepted! Agreed terms are now locked.');
-            this.dirty = true;
-            await this.show(this.task.id);
-          } else {
+
+          if (!res.ok) {
             const err = await res.json().catch(() => ({}));
             alertDialog({ text: err.message || 'Failed to accept task.' });
+            return;
           }
+
+          const data = await res.json().catch(() => ({}));
+          // Hide the banner and flip the badge immediately, then resync.
+          this.applyAssignmentPayload(data);
+          this.flash('Task accepted! Agreed terms are now locked.');
+          this.dirty = true;
+          await this.show(this.task.id);
         } catch (e) {
           console.error(e);
         }
@@ -927,8 +1044,10 @@
             body: JSON.stringify({ rejection_reason: this.rejectionReason.trim() })
           });
           if (res.ok) {
+            const data = await res.json().catch(() => ({}));
             this.showRejectModal = false;
             this.rejectionReason = '';
+            this.applyAssignmentPayload(data);
             this.flash('Assignment rejected.');
             this.dirty = true;
             await this.show(this.task.id);
@@ -1009,5 +1128,10 @@
   window.toggleTaskSubtask = (id) => {
     const panel = document.querySelector('[x-data^="taskPanel"]');
     if (panel) Alpine.$data(panel).toggleSubtask({ id });
+  };
+
+  window.deleteTaskSubtask = (id) => {
+    const panel = document.querySelector('[x-data^="taskPanel"]');
+    if (panel) Alpine.$data(panel).deleteSubtask(id);
   };
 </script>

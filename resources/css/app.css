@@ -1003,6 +1003,18 @@ tbody tr:hover {
     background: var(--primary);
 }
 
+/* Referenced by the status-badge component and the task board, but never
+   defined — "In Review" / "Approved" badges rendered unstyled. */
+.b-review {
+    background: var(--accent-soft);
+
+    color: var(--accent-dark);
+}
+
+.b-review .badge-dot {
+    background: var(--accent);
+}
+
 .b-risk {
     background: var(--warning-soft);
 

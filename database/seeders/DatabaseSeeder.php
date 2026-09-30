@@ -187,9 +187,14 @@ class DatabaseSeeder extends Seeder
             ['sophia@example.com', 'Sophia Chen'],
         ];
         foreach ($legacyUsers as [$email, $name]) {
-            User::firstOrCreate(
+            // These are staff accounts, not public registrants. The `role`
+            // column defaults to 'guest', which (for an account holding no
+            // RBAC role) makes User::isGuest() true and has the approval
+            // middleware bounce them to the pending-approval page on every
+            // request, so their staff role has to be written explicitly.
+            User::updateOrCreate(
                 ['email' => $email],
-                ['full_name' => $name, 'password_hash' => $password, 'status' => 'Active', 'department' => 'Sample Organization', 'office_id' => $offices->first()?->office_id]
+                ['full_name' => $name, 'password_hash' => $password, 'status' => 'Active', 'role' => 'member', 'department' => 'Sample Organization', 'office_id' => $offices->first()?->office_id]
             );
         }
 

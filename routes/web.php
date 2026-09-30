@@ -445,6 +445,13 @@ Route::middleware(['auth', 'active', 'approved'])->group(function () {
         ->name('tasks.subtasks.toggle')
         ->middleware('can:view_tasks');
 
+    Route::delete(
+        '/tasks/subtasks/{subtask}',
+        [TaskController::class, 'destroySubtask']
+    )
+        ->name('tasks.subtasks.destroy')
+        ->middleware('can:view_tasks');
+
     Route::post(
         '/tasks/{task}/accept',
         [TaskController::class, 'accept']
@@ -592,6 +599,16 @@ Route::middleware(['auth', 'active', 'approved'])->group(function () {
     |--------------------------------------------------------------------------
     */
 
+    /*
+     | Expenditure workflow. The listing is intentionally open to every
+     | authenticated user — contributors must be able to review the expenses
+     | they submitted — and is scoped inside PaymentController, while every
+     | transition is authorized by PaymentPolicy.
+     |
+     | Contributor submits (Pending) -> Team Lead / PM approves (Approved)
+     | -> Head of Office / Finance confirms disbursement (Completed).
+     */
+
     Route::get(
         '/payments',
         [PaymentController::class, 'index']
@@ -601,6 +618,21 @@ Route::middleware(['auth', 'active', 'approved'])->group(function () {
         '/payments',
         [PaymentController::class, 'store']
     )->name('payments.store');
+
+    Route::post(
+        '/payments/{payment}/approve',
+        [PaymentController::class, 'approve']
+    )->name('payments.approve');
+
+    Route::post(
+        '/payments/{payment}/disburse',
+        [PaymentController::class, 'disburse']
+    )->name('payments.disburse');
+
+    Route::post(
+        '/payments/{payment}/reject',
+        [PaymentController::class, 'reject']
+    )->name('payments.reject');
 
     Route::put(
         '/payments/{payment}',

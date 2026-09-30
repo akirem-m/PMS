@@ -23,7 +23,7 @@ class SelfRegistrationOfficeTest extends TestCase
 
         $this->seed(DatabaseSeeder::class);
 
-        $this->admin = User::where('email', 'admin@example.com')->firstOrFail();
+        $this->admin = User::where('email', 'admin@pms.test')->firstOrFail();
         $this->ict = Office::create(['office_name' => 'Reg ICT Office', 'office_code' => 'RICT', 'is_active' => true]);
     }
 

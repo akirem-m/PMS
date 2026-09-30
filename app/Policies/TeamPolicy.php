@@ -17,11 +17,11 @@ class TeamPolicy
 
     public function view(User $user, Team $team): bool
     {
-        if ($user->isAdmin()) {
+        if ($user->canAccessGlobalScope()) {
             return true;
         }
 
-        if ($this->leadsOrOversees($user, $team)) {
+        if ($this->leadsOrOversees($user, $team) || $this->headsTeamOffice($user, $team)) {
             return true;
         }
 
@@ -30,56 +30,67 @@ class TeamPolicy
             || $user->officeIds()->contains((int) $team->office_id);
     }
 
+    /**
+     * Managing a team follows the leadership chain: Team Lead (or Sub-Team
+     * Lead) of the team, the Project Manager above it, the Head of Office
+     * owning it, and the Department Head above that.
+     *
+     * Deliberately NOT a bare `manage_team` permission check — that would let
+     * a Team Lead edit teams they do not lead anywhere in the organization.
+     */
     public function update(User $user, Team $team): bool
     {
-        if ($this->headsTeamOffice($user, $team)) {
+        if ($user->canAccessGlobalScope()) {
             return true;
         }
 
-        if ($user->hasPermission('edit_teams')) {
-            return true;
-        }
-
-        return $this->leadsOrOversees($user, $team);
+        return $this->headsTeamOffice($user, $team)
+            || $this->leadsOrOversees($user, $team);
     }
 
     public function delete(User $user, Team $team): bool
     {
-        return $user->hasPermission('delete_teams')
-            && ($user->isAdmin()
-                || $this->headsTeamOffice($user, $team)
-                || $this->leadsOrOversees($user, $team));
+        if ($user->canAccessGlobalScope()) {
+            return true;
+        }
+
+        if (! ($this->headsTeamOffice($user, $team) || $this->leadsOrOversees($user, $team))) {
+            return false;
+        }
+
+        return $user->hasPermission('manage_team')
+            || $user->hasPermission('edit_projects')
+            || $user->isDirectorOrAdmin();
     }
 
     /** Only leaders up the chain may add/remove team members. */
     public function manageMembers(User $user, Team $team): bool
     {
-        if ($this->headsTeamOffice($user, $team)) {
-            return true;
-        }
-
-        if ($user->hasPermission('edit_teams')) {
-            return true;
-        }
-
-        return $this->leadsOrOversees($user, $team);
+        return $this->update($user, $team);
     }
 
     /** Creating a sub-team under this team: Team Lead or above. */
     public function createSubTeam(User $user, Team $team): bool
     {
-        return $this->leadsOrOversees($user, $team)
-            || $this->headsTeamOffice($user, $team);
+        return $this->update($user, $team);
     }
 
     /**
-     * True when this user heads the office the team belongs to — the head
-     * manages only teams that belong to their own office(s).
+     * Office scope: a Head of Office manages every team belonging to their own
+     * office (`$team->office_id === $user->office_id`), plus any office their
+     * Head-of-Office role is explicitly scoped to. A head never reaches a
+     * team in another office.
      */
     protected function headsTeamOffice(User $user, Team $team): bool
     {
-        return (bool) $team->office_id
-            && $user->isOfficeHead()
-            && $user->headOfficeIds()->contains((int) $team->office_id);
+        if (! $team->office_id || ! $user->isOfficeHead()) {
+            return false;
+        }
+
+        if ($user->office_id && (int) $team->office_id === (int) $user->office_id) {
+            return true;
+        }
+
+        return $user->headOfficeIds()->contains((int) $team->office_id);
     }
 }

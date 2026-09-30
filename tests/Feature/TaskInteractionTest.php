@@ -21,8 +21,10 @@ class TaskInteractionTest extends TestCase
         $this->seed(DatabaseSeeder::class);
 
         $author = User::where('email', 'director@example.com')->first();
-        $project = Project::first();
-        $phase = Phase::where('project_id', $project->project_id)->first();
+        // The seeder also creates one demo project per project type (with no
+        // phases), so the phase-bearing sample project is looked up by name.
+        $project = Project::where('project_name', 'Sample PMS')->firstOrFail();
+        $phase = $project->phases()->firstOrFail();
 
         $this->actingAs($author)->post(route('tasks.store'), [
             'phase_id' => $phase->phase_id,
